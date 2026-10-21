@@ -1,5 +1,9 @@
 import bundled from '../data/scmdbHauls.json'
-import { createMission, formatMissionCode, normalizeCrateSize } from './spread'
+import {
+  createMission,
+  formatDemoMissionCode,
+  normalizeCrateSize,
+} from './spread'
 import {
   inferHaulType,
   MAX_HAUL_STOPS,
@@ -447,7 +451,7 @@ export function createScmdbDemoMission(
   const name = `(DEMO) ${t.title}`.replace(/^\(DEMO\)\s*\(DEMO\)/i, '(DEMO)')
 
   return createMission({
-    code: code ?? formatMissionCode((index % catalogHauls.length) + 1),
+    code: code ?? formatDemoMissionCode((index % catalogHauls.length) + 1),
     name,
     haulType,
     rank: parseHaulRank(t.title),

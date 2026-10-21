@@ -78,7 +78,42 @@ function isFeasible(m: Mission, capacity: number): boolean {
 function expandJobs(missions: Mission[]): CargoJob[] {
   const jobs: CargoJob[] = []
   for (const m of missions) {
-    if (m.pickups.length >= 1 && m.dropoffs.length === 1) {
+    if (m.pickups.length > 1 && m.dropoffs.length > 1) {
+      // Multi→multi: split each pickup across dropoffs by dropoff share
+      const dropTotal = m.dropoffs.reduce((s, d) => s + Math.max(0, d.scu), 0)
+      for (const p of m.pickups) {
+        if (p.scu <= 0) continue
+        if (dropTotal <= 0) {
+          const dest = m.dropoffs[0]
+          jobs.push({
+            id: `${m.id}:${p.locationId}->${dest.locationId}`,
+            missionId: m.id,
+            missionName: m.name,
+            pickupId: p.locationId,
+            dropoffId: dest.locationId,
+            scu: p.scu,
+          })
+          continue
+        }
+        let assigned = 0
+        m.dropoffs.forEach((d, di) => {
+          const isLast = di === m.dropoffs.length - 1
+          const share = isLast
+            ? p.scu - assigned
+            : Math.round((p.scu * Math.max(0, d.scu)) / dropTotal)
+          assigned += share
+          if (share <= 0) return
+          jobs.push({
+            id: `${m.id}:${p.locationId}->${d.locationId}`,
+            missionId: m.id,
+            missionName: m.name,
+            pickupId: p.locationId,
+            dropoffId: d.locationId,
+            scu: share,
+          })
+        })
+      }
+    } else if (m.pickups.length >= 1 && m.dropoffs.length === 1) {
       const dest = m.dropoffs[0].locationId
       for (const p of m.pickups) {
         if (p.scu <= 0) continue
@@ -102,20 +137,6 @@ function expandJobs(missions: Mission[]): CargoJob[] {
           pickupId: src,
           dropoffId: d.locationId,
           scu: d.scu,
-        })
-      }
-    } else {
-      for (let i = 0; i < m.pickups.length; i++) {
-        const p = m.pickups[i]
-        const d = m.dropoffs[Math.min(i, m.dropoffs.length - 1)]
-        if (!d || p.scu <= 0) continue
-        jobs.push({
-          id: `${m.id}:${p.locationId}->${d.locationId}:${i}`,
-          missionId: m.id,
-          missionName: m.name,
-          pickupId: p.locationId,
-          dropoffId: d.locationId,
-          scu: p.scu,
         })
       }
     }

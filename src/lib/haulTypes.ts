@@ -14,15 +14,15 @@ export const HAUL_TYPES: HaulType[] = [
   'Interstellar Large Haul',
 ]
 
-/** In-game hauling contract ranks (separate from haul type in the title). */
+/** In-game hauling contract ranks (high → low). */
 export const HAUL_RANKS: HaulRank[] = [
-  'Trainee',
-  'Rookie',
-  'Junior',
-  'Experienced',
-  'Senior',
-  'Expert',
   'Master',
+  'Expert',
+  'Senior',
+  'Experienced',
+  'Junior',
+  'Rookie',
+  'Trainee',
 ]
 
 export const DEFAULT_HAUL_TYPE: HaulType = 'Stellar Medium Haul'
@@ -36,29 +36,53 @@ export function parseHaulRank(text: string): HaulRank | undefined {
   return undefined
 }
 
-/** Auto title: Giver | Rank | Haul Type | From Start / To End */
+/**
+ * Auto title: Giver | Rank | Haul Type | route
+ * - 1 pickup + 1 dropoff → From A To B
+ * - multi pickup + 1 dropoff → From MULTI To B
+ * - 1 pickup + multi dropoff → From A To MULTI
+ * - multi both → From MULTI To MULTI
+ */
 export function buildAutoMissionName(parts: {
   giver?: string
   rank?: string
   haulType?: string
   from?: string
   to?: string
+  pickupCount?: number
+  dropoffCount?: number
+  /** Prefix title with (DEMO) for sample hauls */
+  demo?: boolean
 }): string {
-  const route =
-    parts.from && parts.to
-      ? `From ${parts.from} / To ${parts.to}`
-      : parts.from
-        ? `From ${parts.from}`
-        : parts.to
-          ? `To ${parts.to}`
-          : ''
-  return [parts.giver, parts.rank, parts.haulType, route]
+  const fromLabel = parts.from?.trim() || ''
+  const toLabel = parts.to?.trim() || ''
+  const pickups = parts.pickupCount ?? (fromLabel ? 1 : 0)
+  const dropoffs = parts.dropoffCount ?? (toLabel ? 1 : 0)
+
+  let route = ''
+  if (pickups >= 1 && dropoffs >= 1) {
+    const fromPart = pickups === 1 ? fromLabel : 'MULTI'
+    const toPart = dropoffs === 1 ? toLabel : 'MULTI'
+    route = `From ${fromPart} To ${toPart}`
+  } else if (pickups === 1 && fromLabel) {
+    route = `From ${fromLabel}`
+  } else if (dropoffs === 1 && toLabel) {
+    route = `To ${toLabel}`
+  } else if (pickups > 1) {
+    route = 'From MULTI'
+  } else if (dropoffs > 1) {
+    route = 'To MULTI'
+  }
+
+  const core = [parts.giver, parts.rank, parts.haulType, route]
     .map((s) => (typeof s === 'string' ? s.trim() : ''))
     .filter(Boolean)
     .join(' | ')
+  if (!core) return parts.demo ? '(DEMO)' : ''
+  return parts.demo ? `(DEMO) ${core}` : core
 }
 
-/** Max stops on the multi side of a haul (pickups or dropoffs). */
+/** Max stops per side (pickups or dropoffs). Both sides may be multi. */
 export const MAX_HAUL_STOPS = 5
 
 /** Multi-pickup contracts (typical stellar / interstellar). */
@@ -72,24 +96,19 @@ export function haulAllowsMultiDropoff(haul: HaulType): boolean {
 }
 
 /**
- * Multi is allowed on pickups or dropoffs (not both). Cap each side at max.
- * When one side goes multi, the other collapses to a single stop.
+ * Cap each side at max. Multi pickups and multi dropoffs may both be set.
+ * `changed` is kept for call-site compatibility.
  */
 export function reconcileHaulStops(
   pickupIds: string[],
   dropoffIds: string[],
-  changed: 'pickup' | 'dropoff',
+  _changed: 'pickup' | 'dropoff',
   max = MAX_HAUL_STOPS,
 ): { pickupIds: string[]; dropoffIds: string[] } {
-  let picks = pickupIds.filter(Boolean).slice(0, max)
-  let drops = dropoffIds.filter(Boolean).slice(0, max)
-  if (changed === 'pickup' && picks.length > 1 && drops.length > 1) {
-    drops = drops.slice(0, 1)
+  return {
+    pickupIds: pickupIds.filter(Boolean).slice(0, max),
+    dropoffIds: dropoffIds.filter(Boolean).slice(0, max),
   }
-  if (changed === 'dropoff' && drops.length > 1 && picks.length > 1) {
-    picks = picks.slice(0, 1)
-  }
-  return { pickupIds: picks, dropoffIds: drops }
 }
 
 export function parseHaulType(text: string): HaulType | undefined {

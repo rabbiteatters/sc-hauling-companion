@@ -21,8 +21,10 @@ import { formatAuec, optimizeRoute } from './lib/optimizer'
 import {
   DEFAULT_MAX_UNIT_SCU,
   amendPickupActual,
+  clampMissionCode,
   createMission,
   formatStopSummary,
+  nextDemoMissionCode,
   nextMissionCode,
   normalizeCrateSize,
 } from './lib/spread'
@@ -228,20 +230,43 @@ export default function App() {
         maxUnitScu: DEFAULT_MAX_UNIT_SCU,
         rewardAuec: 0,
         commodity: '',
+        demo: false,
       })
     } else {
+      const isDemo = m.source === 'demo'
+      const pickupIds = m.pickups.map((p) => p.locationId)
+      const dropoffIds = m.dropoffs.map((d) => d.locationId)
+      const fromLabel = pickupIds[0] ? locationLabel(pickupIds[0]) : ''
+      const toLabel = dropoffIds.length
+        ? locationLabel(dropoffIds[dropoffIds.length - 1])
+        : ''
       setDraftHaul(m.haulType)
       setDraft({
-        code: draft.code || nextMissionCode(missions),
-        name: m.name,
+        code: isDemo
+          ? nextDemoMissionCode(missions)
+          : draft.code || nextMissionCode(missions),
+        // Demo uses auto title with (DEMO) prefix; OCR/manual keep parsed name
+        name: isDemo
+          ? buildAutoMissionName({
+              giver: m.giver,
+              rank: m.rank,
+              haulType: m.haulType,
+              from: fromLabel,
+              to: toLabel,
+              pickupCount: pickupIds.length,
+              dropoffCount: dropoffIds.length,
+              demo: true,
+            })
+          : m.name,
         giver: m.giver ?? '',
         rank: m.rank ?? '',
-        pickupIds: m.pickups.map((p) => p.locationId),
-        dropoffIds: m.dropoffs.map((d) => d.locationId),
+        pickupIds,
+        dropoffIds,
         totalScu: m.totalScu,
         maxUnitScu: normalizeCrateSize(m.maxUnitScu),
         rewardAuec: m.rewardAuec ?? 0,
         commodity: m.commodity ?? '',
+        demo: isDemo,
       })
     }
     setOcrFormKey((k) => k + 1)
@@ -277,7 +302,11 @@ export default function App() {
       : draft.dropoffIds
     if (!pickupIds.length || !dropoffIds.length) return
 
-    const code = draft.code.trim() || nextMissionCode(missions)
+    const isDemo =
+      Boolean(draft.demo) || draft.name.trim().startsWith('(DEMO)')
+    const code =
+      clampMissionCode(draft.code) ||
+      (isDemo ? nextDemoMissionCode(missions) : nextMissionCode(missions))
     setMissions((prev) => {
       const fromLabel = locationLabel(pickupIds[0])
       const toLabel = locationLabel(dropoffIds[dropoffIds.length - 1])
@@ -287,6 +316,9 @@ export default function App() {
         haulType: draftHaul,
         from: fromLabel,
         to: toLabel,
+        pickupCount: pickupIds.length,
+        dropoffCount: dropoffIds.length,
+        demo: isDemo,
       })
       const mission = createMission({
         code,
@@ -306,17 +338,19 @@ export default function App() {
         ),
         rewardAuec: Number(draft.rewardAuec) || scanned?.rewardAuec,
         commodity: draft.commodity.trim() || scanned?.commodity,
-        source: scanned
-          ? 'ocr'
-          : draft.name.trim().startsWith('(DEMO)')
-            ? 'demo'
-            : 'manual',
+        source: scanned ? 'ocr' : isDemo ? 'demo' : 'manual',
       })
       return [...prev, mission]
     })
     setMissionsInitialized(true)
     setRoute(null)
-    setDraft((d) => ({ ...d, code: nextMissionCode([...missions, { code } as Mission]) }))
+    setDraft((d) => {
+      const cursor = [...missions, { code } as Mission]
+      return {
+        ...d,
+        code: d.demo ? nextDemoMissionCode(cursor) : nextMissionCode(cursor),
+      }
+    })
 
     // Multi OCR: keep window open and load the next scan into the form
     if (ocrPending && !ocrPending.applyToMissionId && ocrPending.items.length > 1) {
@@ -1107,6 +1141,7 @@ export default function App() {
         <MissionModal
           step={modalStep}
           mission={editingMission}
+          missions={missions}
           locations={getAllLocations()}
           commodities={catalog.commodities}
           givers={catalog.givers}

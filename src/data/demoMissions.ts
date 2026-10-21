@@ -1,4 +1,4 @@
-import { createMission, formatMissionCode } from '../lib/spread'
+import { createMission, formatDemoMissionCode } from '../lib/spread'
 import { ensureLocation } from '../store/catalog'
 import type { Mission } from '../types'
 
@@ -75,11 +75,11 @@ export function createDemoMission(index: number, code?: string): Mission {
   const seed = seeds[((index % seeds.length) + seeds.length) % seeds.length]
   return createMission({
     ...seed,
-    code: code ?? formatMissionCode((index % seeds.length) + 1),
+    code: code ?? formatDemoMissionCode((index % seeds.length) + 1),
     source: 'demo',
   })
 }
 
 export function createDemoMissions(): Mission[] {
-  return demoSeeds().map((_, i) => createDemoMission(i, formatMissionCode(i + 1)))
+  return demoSeeds().map((_, i) => createDemoMission(i, formatDemoMissionCode(i + 1)))
 }

@@ -21,7 +21,8 @@ export function RankPicker({ value, onChange, idPrefix = 'rank' }: Props) {
       options={[...HAUL_RANKS]}
       value={text}
       idPrefix={idPrefix}
-      placeholder="Trainee, Rookie…"
+      placeholder="Master, Expert…"
+      preserveOrder
       onChange={(next) => {
         setText(next)
         const parsed = parseHaulRank(next)

@@ -5,7 +5,7 @@ import {
   HAUL_TYPES,
   parseHaulRank,
 } from './haulTypes'
-import { DEFAULT_MAX_UNIT_SCU, normalizeCrateSize } from './spread'
+import { clampMissionCode, DEFAULT_MAX_UNIT_SCU, normalizeCrateSize } from './spread'
 import type { HaulType, Mission } from '../types'
 
 const STORAGE_KEY = 'sc-hauling-app-cache-v1'
@@ -23,6 +23,8 @@ export interface DraftCache {
   maxUnitScu: number
   rewardAuec: number
   commodity: string
+  /** Sample haul — auto title keeps a (DEMO) prefix */
+  demo?: boolean
 }
 
 export interface AppCache {
@@ -51,6 +53,7 @@ export const DEFAULT_DRAFT: DraftCache = {
   maxUnitScu: DEFAULT_MAX_UNIT_SCU,
   rewardAuec: 958250,
   commodity: 'Potassium',
+  demo: false,
 }
 
 export const DEFAULT_APP_CACHE: AppCache = {
@@ -80,7 +83,10 @@ function sanitizeMission(raw: unknown): Mission | null {
     undefined
   return {
     id: String(m.id),
-    code: typeof m.code === 'string' && m.code.trim() ? m.code.trim() : 'C01',
+    code:
+      typeof m.code === 'string' && m.code.trim()
+        ? clampMissionCode(m.code)
+        : 'C01',
     name: String(m.name),
     haulType,
     rank: rank
@@ -118,7 +124,10 @@ function sanitizeDraft(raw: unknown): DraftCache {
       ? d.rank.trim()
       : parseHaulRank(typeof d.name === 'string' ? d.name : '') || DEFAULT_DRAFT.rank
   return {
-    code: typeof d.code === 'string' && d.code.trim() ? d.code.trim() : DEFAULT_DRAFT.code,
+    code:
+      typeof d.code === 'string' && d.code.trim()
+        ? clampMissionCode(d.code)
+        : DEFAULT_DRAFT.code,
     name: typeof d.name === 'string' ? d.name : DEFAULT_DRAFT.name,
     giver: typeof d.giver === 'string' ? d.giver : '',
     rank,
@@ -132,6 +141,10 @@ function sanitizeDraft(raw: unknown): DraftCache {
     maxUnitScu: normalizeCrateSize(Number(d.maxUnitScu) || DEFAULT_DRAFT.maxUnitScu),
     rewardAuec: Math.max(0, Number(d.rewardAuec) || 0),
     commodity: typeof d.commodity === 'string' ? d.commodity : DEFAULT_DRAFT.commodity,
+    demo:
+      typeof d.demo === 'boolean'
+        ? d.demo
+        : typeof d.name === 'string' && /^\(DEMO\)/i.test(d.name.trim()),
   }
 }
 

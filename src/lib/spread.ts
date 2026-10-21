@@ -191,17 +191,35 @@ export function buildDropoffs(
 }
 
 /** How cargo is spread across stops — derived from stop counts, not haul label. */
-export type RouteShape = 'direct' | 'multiplePickUp' | 'multipleDropOff'
+export type RouteShape =
+  | 'direct'
+  | 'multiplePickUp'
+  | 'multipleDropOff'
+  | 'multipleBoth'
 
 export function inferRouteShape(pickupCount: number, dropoffCount: number): RouteShape {
-  if (pickupCount > 1 && dropoffCount <= 1) return 'multiplePickUp'
-  if (dropoffCount > 1 && pickupCount <= 1) return 'multipleDropOff'
+  if (pickupCount > 1 && dropoffCount > 1) return 'multipleBoth'
+  if (pickupCount > 1) return 'multiplePickUp'
+  if (dropoffCount > 1) return 'multipleDropOff'
   return 'direct'
+}
+
+/** Max length for mission codes (title bar + persistence). */
+export const MISSION_CODE_MAX_LEN = 5
+
+/** Clamp / normalize a mission code to at most 5 characters. */
+export function clampMissionCode(code: string): string {
+  return code.trim().slice(0, MISSION_CODE_MAX_LEN)
 }
 
 /** Format sequential mission codes: C01, C02, … */
 export function formatMissionCode(n: number): string {
-  return `C${String(Math.max(1, Math.round(n))).padStart(2, '0')}`
+  return clampMissionCode(`C${String(Math.max(1, Math.round(n))).padStart(2, '0')}`)
+}
+
+/** Format demo mission codes: D01, D02, … */
+export function formatDemoMissionCode(n: number): string {
+  return clampMissionCode(`D${String(Math.max(1, Math.round(n))).padStart(2, '0')}`)
 }
 
 export function missionCodeNumber(code: string): number {
@@ -209,13 +227,27 @@ export function missionCodeNumber(code: string): number {
   return m ? Number(m[1]) : 0
 }
 
-/** Next unused code given missions already in the list. */
+export function demoMissionCodeNumber(code: string): number {
+  const m = /^d(\d+)$/i.exec(code.trim())
+  return m ? Number(m[1]) : 0
+}
+
+/** Next unused C-series code given missions already in the list. */
 export function nextMissionCode(existing: Mission[]): string {
   let max = 0
   for (const m of existing) {
     max = Math.max(max, missionCodeNumber(m.code))
   }
   return formatMissionCode(max + 1)
+}
+
+/** Next unused D-series code for demo missions. */
+export function nextDemoMissionCode(existing: Mission[]): string {
+  let max = 0
+  for (const m of existing) {
+    max = Math.max(max, demoMissionCodeNumber(m.code))
+  }
+  return formatDemoMissionCode(max + 1)
 }
 
 /** Assign C01…Cn to missions missing a code (keeps existing codes). */
@@ -262,7 +294,10 @@ export function createMission(input: {
   let pickups: MissionStop[]
   let dropoffs: MissionStop[]
 
-  if (shape === 'multipleDropOff') {
+  if (shape === 'multipleBoth') {
+    pickups = buildStops(input.pickupIds, totalScu, maxUnitScu)
+    dropoffs = buildDropoffs(input.dropoffIds, totalScu, maxUnitScu)
+  } else if (shape === 'multipleDropOff') {
     pickups = [{ locationId: input.pickupIds[0], scu: totalScu, confirmed: false }]
     dropoffs = buildDropoffs(input.dropoffIds, totalScu, maxUnitScu)
   } else if (shape === 'multiplePickUp') {
@@ -284,7 +319,7 @@ export function createMission(input: {
     })
     const mission: Mission = {
       id: input.id ?? crypto.randomUUID(),
-      code: input.code ?? formatMissionCode(1),
+      code: clampMissionCode(input.code ?? '') || formatMissionCode(1),
       name: input.name,
       haulType,
       rank: input.rank?.trim() || undefined,
@@ -302,7 +337,7 @@ export function createMission(input: {
 
   return {
     id: input.id ?? crypto.randomUUID(),
-    code: input.code ?? formatMissionCode(1),
+    code: clampMissionCode(input.code ?? '') || formatMissionCode(1),
     name: input.name,
     haulType,
     rank: input.rank?.trim() || undefined,

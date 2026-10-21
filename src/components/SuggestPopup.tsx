@@ -7,6 +7,8 @@ interface Props {
   onChange: (value: string) => void
   idPrefix: string
   placeholder?: string
+  /** Keep `options` order (e.g. rank by level) instead of A–Z. */
+  preserveOrder?: boolean
 }
 
 function matchScore(name: string, q: string): number {
@@ -27,6 +29,7 @@ export function SuggestPopup({
   onChange,
   idPrefix,
   placeholder = 'Type or pick…',
+  preserveOrder = false,
 }: Props) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -50,16 +53,19 @@ export function SuggestPopup({
   }, [open])
 
   const items = useMemo(() => {
+    const orderIndex = new Map(options.map((o, i) => [o, i]))
+    const byOptionOrder = (a: string, b: string) =>
+      (orderIndex.get(a) ?? 0) - (orderIndex.get(b) ?? 0)
+    const byAlpha = (a: string, b: string) => a.localeCompare(b)
+    const tieBreak = preserveOrder ? byOptionOrder : byAlpha
+
     if (!q || exactSelected) {
-      return [...options].sort((a, b) => a.localeCompare(b))
+      return preserveOrder ? [...options] : [...options].sort(byAlpha)
     }
     return [...options]
       .filter((o) => matchScore(o, q) >= 0)
-      .sort(
-        (a, b) =>
-          matchScore(a, q) - matchScore(b, q) || a.localeCompare(b),
-      )
-  }, [options, q, exactSelected])
+      .sort((a, b) => matchScore(a, q) - matchScore(b, q) || tieBreak(a, b))
+  }, [options, q, exactSelected, preserveOrder])
 
   function pick(name: string) {
     onChange(name)
