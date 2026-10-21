@@ -62,6 +62,15 @@ export interface MissionStop {
   confirmed?: boolean
 }
 
+/** One commodity leg within a mission (cargo source of truth). */
+export interface MissionObjective {
+  id: string
+  commodity: string
+  totalScu: number
+  pickups: MissionStop[]
+  dropoffs: MissionStop[]
+}
+
 export interface Mission {
   id: string
   /** Short label e.g. c01, c02 — stable while the mission is in the list */
@@ -73,12 +82,17 @@ export interface Mission {
   rank?: HaulRank | string
   /** Contract giver / org from OCR */
   giver?: string
+  /** Aggregated from objectives (first / joined) for list display */
   commodity?: string
   rewardAuec?: number
+  /** Sum of objective totals */
   totalScu: number
   maxUnitScu: number
+  /** Flattened from objectives for legacy UI / amend helpers */
   pickups: MissionStop[]
   dropoffs: MissionStop[]
+  /** Cargo legs — source of truth when present */
+  objectives: MissionObjective[]
   source: 'manual' | 'ocr' | 'demo'
 }
 

@@ -392,6 +392,26 @@
   transition: width 0.2s ease;
 }
 
+/* Compact inline track in the title bar ? always reserved, no modal jump */
+.ocr-upload-progress {
+  flex: 0 0 4.5rem;
+  width: 4.5rem;
+  height: 3px;
+  margin: 0 0.25rem 0 auto;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(148, 176, 196, 0.12);
+  align-self: center;
+}
+
+.ocr-upload-progress > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--mint, #48b46e);
+  transition: width 0.2s ease;
+}
+
 .add-mission-combined {
   display: flex;
   flex-direction: column;
@@ -406,27 +426,30 @@
   overflow: hidden;
 }
 
-.ocr-upload-head {
+.ocr-upload-head-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.45rem 0.55rem 0.45rem 0.75rem;
-  border-bottom: 1px solid rgba(148, 176, 196, 0.12);
+  gap: 0.25rem;
+  flex-shrink: 0;
 }
 
 .ocr-upload-title {
   font-size: 0.78rem;
   font-weight: 600;
   color: var(--fog);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .ocr-regions-gear {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 2rem;
-  padding: 0.3rem;
+  min-width: 1.75rem;
+  padding: 0.2rem;
   color: var(--steel);
 }
 
@@ -441,13 +464,26 @@
   display: block;
 }
 
-.ocr-upload-block .ocr-drop {
+.ocr-upload-block .ocr-drop,
+.ocr-upload-block .ocr-upload-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
   margin: 0;
-  padding: 0.75rem 0.85rem 0.85rem;
+  padding: 0.35rem 0.4rem 0.35rem 0.7rem;
   border: none;
   border-radius: 0;
   background: transparent;
-  text-align: center;
+  text-align: left;
+}
+
+.ocr-upload-bar .primary,
+.ocr-upload-bar .ghost:not(.ocr-regions-gear) {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.75rem;
+  min-height: 0;
 }
 
 .ocr-upload-block .paste-box {
@@ -2505,8 +2541,10 @@ button.danger {
   color: var(--fog);
 }
 
-.ocr-image-stage {
+.ocr-image-stage,
+.ocr-image-viewport {
   position: relative;
+  width: 100%;
   height: min(42vh, 420px);
   overflow: hidden;
   background: rgba(6, 10, 14, 0.7);
@@ -2515,20 +2553,70 @@ button.danger {
   cursor: grab;
   touch-action: none;
   user-select: none;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
 }
 
-.ocr-image-stage:active {
+.ocr-image-stage:active,
+.ocr-image-viewport:active {
   cursor: grabbing;
 }
 
-.ocr-image-stage img {
+.ocr-image-viewport.drag-over {
+  outline: 2px solid rgba(72, 180, 110, 0.55);
+  outline-offset: -2px;
+  background: rgba(72, 180, 110, 0.08);
+}
+
+/* 100% width of stage is zoom 1 ? same as region setup */
+.ocr-image-world {
   display: block;
-  max-width: none;
-  width: auto;
-  height: 100%;
-  margin: 0 auto;
-  transform-origin: center center;
+  width: 100%;
+  line-height: 0;
+  transform-origin: 0 0;
+  user-select: none;
+  touch-action: none;
   pointer-events: none;
+}
+
+.ocr-image-world img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  pointer-events: none;
+}
+
+.ocr-zoom-overlay {
+  position: absolute;
+  right: 0.4rem;
+  bottom: 0.4rem;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.12rem 0.2rem;
+  background: rgba(6, 10, 14, 0.82);
+  border: 1px solid rgba(148, 176, 196, 0.22);
+  border-radius: 3px;
+  pointer-events: auto;
+  cursor: default;
+}
+
+.ocr-zoom-overlay .ghost {
+  min-width: 1.45rem;
+  padding: 0.1rem 0.28rem;
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.ocr-zoom-overlay .ocr-zoom-label {
+  min-width: 2.5rem;
+  text-align: center;
+  font-family: ui-monospace, 'Cascadia Code', 'Segoe UI Mono', monospace;
+  font-size: 0.68rem;
+  color: var(--fog);
 }
 
 .ocr-region-raw {
@@ -2751,4 +2839,321 @@ button.danger {
     animation: none;
     transition: none;
   }
+}
+
+/* -- Mission objectives (expandable groups) -- */
+.objectives-section {
+  margin: 0.75rem 0 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.objectives-section-head {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.objectives-section-title {
+  flex: 1;
+  margin: 0;
+  font-size: 0.84rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--fog);
+}
+
+.objectives-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.objective-panel {
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+}
+
+.objective-panel.collapsed {
+  padding: 0.3rem 0.5rem;
+}
+
+.objective-collapse-bar {
+  gap: 0.3rem;
+}
+
+.objective-collapse-title {
+  font-size: 0.78rem !important;
+  letter-spacing: 0.02em !important;
+  text-transform: none !important;
+  white-space: normal !important;
+  line-height: 1.35;
+  overflow: visible !important;
+  text-overflow: unset !important;
+}
+
+.objective-reorder {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  flex-shrink: 0;
+}
+
+.objective-reorder .icon-btn {
+  width: 1.35rem;
+  height: 1.2rem;
+  min-width: 1.35rem;
+  font-size: 0.7rem;
+  line-height: 1;
+  padding: 0 !important;
+}
+
+.objectives-section-actions {
+  gap: 0.35rem;
+}
+
+.objective-reorder-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.22rem 0.55rem !important;
+  font-size: 0.75rem !important;
+  letter-spacing: 0.03em;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.14));
+  border-radius: 3px;
+}
+
+.objective-reorder-toggle svg {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.objective-reorder-toggle.is-active {
+  color: var(--mint);
+  border-color: var(--mint);
+  background: color-mix(in srgb, var(--mint) 12%, transparent);
+}
+
+.objective-body {
+  margin-top: 0.55rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.objective-total-row {
+  align-items: flex-end;
+}
+
+/* Native spinner stays flush right; +/- only paints on top (no layout change) */
+.objective-total-input-wrap {
+  position: relative;
+  display: block;
+  flex: 1;
+  min-width: 0;
+}
+
+.objective-total-input-wrap input {
+  display: block;
+  width: 100%;
+  text-align: left;
+}
+
+.objective-total-input-wrap.is-mismatch input,
+.objective-total-input-wrap input.input-mismatch {
+  border-color: #e85d5d;
+  color: #e85d5d;
+}
+
+.objective-delta-overlay {
+  position: absolute;
+  top: 50%;
+  right: 2.1rem; /* clear of native spinner hit area */
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.2rem;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.objective-delta-overlay .objective-delta-infield {
+  pointer-events: auto;
+}
+
+.objective-delta-infield {
+  margin: 0;
+  padding: 0.18rem 0.35rem;
+  min-width: 2.35rem;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  background: color-mix(in srgb, currentColor 14%, rgba(10, 16, 22, 0.95));
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 0.78rem;
+  line-height: 1.1;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.objective-delta-infield.is-plus {
+  color: var(--mint, #3ecf8e);
+}
+
+.objective-delta-infield.is-minus {
+  color: #e85d5d;
+}
+
+.objective-delta-infield:hover {
+  background: color-mix(in srgb, currentColor 22%, rgba(10, 16, 22, 0.95));
+}
+
+.objective-delta-infield:active {
+  background: color-mix(in srgb, currentColor 30%, transparent);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.objective-delta-infield:focus-visible {
+  outline: 1px solid currentColor;
+  outline-offset: 1px;
+}
+
+.objective-mismatch-error {
+  margin: -0.25rem 0 0;
+  font-size: 0.78rem;
+  color: #e85d5d;
+  font-weight: 600;
+}
+
+.field-mismatch > span,
+.objective-collapse-title.is-mismatch,
+.objective-stop-scu-head .is-mismatch {
+  color: #e85d5d;
+}
+
+.input-mismatch,
+input.input-mismatch {
+  border-color: #e85d5d !important;
+  color: #e85d5d;
+}
+
+.objective-panel.has-mismatch {
+  border-color: color-mix(in srgb, #e85d5d 45%, transparent);
+}
+
+.objective-stop-scu-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.objective-stop-scu-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  color: var(--fog);
+  letter-spacing: 0.03em;
+}
+
+.objective-stop-scu-sum-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.objective-sum-reset {
+  padding: 0.12rem 0.4rem !important;
+  font-size: 0.68rem !important;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.16));
+  border-radius: 2px;
+  opacity: 0.75;
+}
+
+.objective-sum-reset.is-active {
+  opacity: 1;
+  color: var(--mint, #3ecf8e);
+  border-color: color-mix(in srgb, var(--mint, #3ecf8e) 55%, transparent);
+}
+
+.objective-sum-reset:hover {
+  opacity: 1;
+  color: var(--mint, #3ecf8e);
+}
+
+.objective-stop-scu-sum {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  transition: color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
+}
+
+.objective-stop-scu-block.is-delta-highlight {
+  outline: 1px solid color-mix(in srgb, var(--mint, #3ecf8e) 55%, transparent);
+  outline-offset: 2px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--mint, #3ecf8e) 8%, transparent);
+}
+
+.objective-stop-scu-sum.is-delta-highlight {
+  color: var(--mint, #3ecf8e);
+  background: color-mix(in srgb, var(--mint, #3ecf8e) 18%, transparent);
+  padding: 0.1rem 0.35rem;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--mint, #3ecf8e) 45%, transparent);
+}
+
+.objective-stop-scu-block.is-mismatch.is-delta-highlight {
+  outline-color: color-mix(in srgb, #e85d5d 55%, transparent);
+  background: color-mix(in srgb, #e85d5d 8%, transparent);
+}
+
+.objective-stop-scu-sum.is-mismatch.is-delta-highlight {
+  color: #e85d5d;
+  background: color-mix(in srgb, #e85d5d 16%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, #e85d5d 45%, transparent);
+}
+
+.objective-stop-scu-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.objective-stop-scu-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+}
+
+.objective-stop-scu-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fog);
+}
+
+.objective-stop-scu-input {
+  width: 4.5rem;
+  flex-shrink: 0;
+}
+
+.objective-stop-scu-unit {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: var(--fog);
+  opacity: 0.85;
 }

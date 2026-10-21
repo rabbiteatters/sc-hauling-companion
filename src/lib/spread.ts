@@ -1,5 +1,10 @@
 import { DEFAULT_HAUL_TYPE, inferHaulType } from './haulTypes'
-import type { HaulType, Mission, MissionStop } from '../types'
+import {
+  createEmptyObjective,
+  legacyMissionToObjectives,
+  withObjectiveAggregates,
+} from './objectives'
+import type { HaulType, Mission, MissionObjective, MissionStop } from '../types'
 
 /** Legal Star Citizen cargo crate sizes (powers of 2). */
 export const CRATE_SIZES = [1, 2, 4, 8, 16, 32, 64] as const
@@ -98,32 +103,33 @@ export function allowedCrateSizes(maxUnitScu: number = DEFAULT_MAX_UNIT_SCU): Cr
  * Confirm actual SCU at a pickup; re-spread the remainder across
  * following unconfirmed pickups on the same mission.
  */
-export function amendPickupActual(
-  mission: Mission,
+function amendObjectivePickup(
+  objective: MissionObjective,
   locationId: string,
   actualScu: number,
-): Mission {
-  const idx = mission.pickups.findIndex((p) => p.locationId === locationId)
-  if (idx < 0) return mission
+  maxUnitScu: number,
+  missionTotalFallback: number,
+): MissionObjective | null {
+  const idx = objective.pickups.findIndex((p) => p.locationId === locationId)
+  if (idx < 0) return null
 
-  const pickups = mission.pickups.map((p) => ({ ...p }))
+  const pickups = objective.pickups.map((p) => ({ ...p }))
   const actual = Math.max(0, Math.round(actualScu))
   pickups[idx] = { ...pickups[idx], scu: actual, confirmed: true }
 
+  const objTotal = objective.totalScu > 0 ? objective.totalScu : missionTotalFallback
   const usedThrough = pickups.slice(0, idx + 1).reduce((s, p) => s + p.scu, 0)
   const laterConfirmedSum = pickups
     .filter((p, i) => i > idx && p.confirmed)
     .reduce((s, p) => s + p.scu, 0)
-  const toSpread = Math.max(0, mission.totalScu - usedThrough - laterConfirmedSum)
+  const toSpread = Math.max(0, objTotal - usedThrough - laterConfirmedSum)
 
   const followingIdx = pickups
     .map((_, i) => i)
     .filter((i) => i > idx && !pickups[i].confirmed)
 
-  if (followingIdx.length === 0) {
-    // No following stops — clamp is fine; leftover stays unmatched to total
-  } else {
-    const amounts = spreadCargo(toSpread, followingIdx.length, mission.maxUnitScu)
+  if (followingIdx.length) {
+    const amounts = spreadCargo(toSpread, followingIdx.length, maxUnitScu)
     followingIdx.forEach((fi, j) => {
       pickups[fi] = {
         ...pickups[fi],
@@ -135,34 +141,69 @@ export function amendPickupActual(
 
   const pickupSum = pickups.reduce((s, p) => s + p.scu, 0)
   const dropoffs =
-    mission.dropoffs.length === 1
-      ? [{ ...mission.dropoffs[0], scu: pickupSum }]
-      : mission.dropoffs
+    objective.dropoffs.length === 1
+      ? [{ ...objective.dropoffs[0], scu: pickupSum }]
+      : objective.dropoffs
 
-  return { ...mission, pickups, dropoffs }
+  return {
+    ...objective,
+    pickups,
+    dropoffs,
+    totalScu: Math.max(objective.totalScu, pickupSum),
+  }
+}
+
+export function amendPickupActual(
+  mission: Mission,
+  locationId: string,
+  actualScu: number,
+): Mission {
+  const objectives = legacyMissionToObjectives(mission)
+  let found = false
+  const nextObjectives = objectives.map((o) => {
+    if (found) return o
+    const amended = amendObjectivePickup(
+      o,
+      locationId,
+      actualScu,
+      mission.maxUnitScu,
+      mission.totalScu,
+    )
+    if (!amended) return o
+    found = true
+    return amended
+  })
+  if (!found) return mission
+  return withObjectiveAggregates({ ...mission, objectives: nextObjectives })
 }
 
 /** Re-spread only unconfirmed pickups (keeps confirmed actuals). */
 export function respreadUnconfirmed(mission: Mission): Mission {
-  const pickups = mission.pickups.map((p) => ({ ...p }))
-  const confirmedSum = pickups.filter((p) => p.confirmed).reduce((s, p) => s + p.scu, 0)
-  const openIdx = pickups.map((_, i) => i).filter((i) => !pickups[i].confirmed)
-  const toSpread = Math.max(0, mission.totalScu - confirmedSum)
+  const objectives = legacyMissionToObjectives(mission).map((objective) => {
+    const pickups = objective.pickups.map((p) => ({ ...p }))
+    const confirmedSum = pickups
+      .filter((p) => p.confirmed)
+      .reduce((s, p) => s + p.scu, 0)
+    const openIdx = pickups.map((_, i) => i).filter((i) => !pickups[i].confirmed)
+    const objTotal = objective.totalScu > 0 ? objective.totalScu : mission.totalScu
+    const toSpread = Math.max(0, objTotal - confirmedSum)
 
-  if (openIdx.length) {
-    const amounts = spreadCargo(toSpread, openIdx.length, mission.maxUnitScu)
-    openIdx.forEach((i, j) => {
-      pickups[i] = { ...pickups[i], scu: amounts[j] ?? 0 }
-    })
-  }
+    if (openIdx.length) {
+      const amounts = spreadCargo(toSpread, openIdx.length, mission.maxUnitScu)
+      openIdx.forEach((i, j) => {
+        pickups[i] = { ...pickups[i], scu: amounts[j] ?? 0 }
+      })
+    }
 
-  const pickupSum = pickups.reduce((s, p) => s + p.scu, 0)
-  const dropoffs =
-    mission.dropoffs.length === 1
-      ? [{ ...mission.dropoffs[0], scu: pickupSum }]
-      : mission.dropoffs
+    const pickupSum = pickups.reduce((s, p) => s + p.scu, 0)
+    const dropoffs =
+      objective.dropoffs.length === 1
+        ? [{ ...objective.dropoffs[0], scu: pickupSum }]
+        : objective.dropoffs
 
-  return { ...mission, pickups, dropoffs }
+    return { ...objective, pickups, dropoffs, totalScu: Math.max(objective.totalScu, pickupSum) }
+  })
+  return withObjectiveAggregates({ ...mission, objectives })
 }
 
 export function buildStops(
@@ -281,61 +322,58 @@ export function createMission(input: {
   code?: string
   /** Preserve confirmed pickups when rebuilding */
   priorPickups?: MissionStop[]
+  /** When set, used as cargo source of truth (flat fields ignored for stops) */
+  objectives?: MissionObjective[]
 }): Mission {
   const maxUnitScu = normalizeCrateSize(input.maxUnitScu ?? DEFAULT_MAX_UNIT_SCU)
-  const totalScu = Math.max(1, Math.round(input.totalScu))
   const haulType =
     input.haulType ??
     input.missionType ??
     inferHaulType(input.pickupIds.length, input.dropoffIds.length, input.name) ??
     DEFAULT_HAUL_TYPE
-  const shape = inferRouteShape(input.pickupIds.length, input.dropoffIds.length)
 
-  let pickups: MissionStop[]
-  let dropoffs: MissionStop[]
+  let objectives: MissionObjective[]
 
-  if (shape === 'multipleBoth') {
-    pickups = buildStops(input.pickupIds, totalScu, maxUnitScu)
-    dropoffs = buildDropoffs(input.dropoffIds, totalScu, maxUnitScu)
-  } else if (shape === 'multipleDropOff') {
-    pickups = [{ locationId: input.pickupIds[0], scu: totalScu, confirmed: false }]
-    dropoffs = buildDropoffs(input.dropoffIds, totalScu, maxUnitScu)
-  } else if (shape === 'multiplePickUp') {
-    pickups = buildStops(input.pickupIds, totalScu, maxUnitScu)
-    dropoffs = [{ locationId: input.dropoffIds[0], scu: totalScu }]
-  } else {
-    pickups = [{ locationId: input.pickupIds[0], scu: totalScu, confirmed: false }]
-    dropoffs = [{ locationId: input.dropoffIds[0], scu: totalScu }]
-  }
-
-  // Restore confirmed actuals from a prior version of the same stops
-  if (input.priorPickups?.length) {
-    const priorByLoc = new Map(
-      input.priorPickups.filter((p) => p.confirmed).map((p) => [p.locationId, p]),
+  if (input.objectives?.length) {
+    objectives = input.objectives.map((o) =>
+      createEmptyObjective({
+        ...o,
+        pickups: o.pickups.map((p) => ({ ...p })),
+        dropoffs: o.dropoffs.map((d) => ({ ...d })),
+      }),
     )
-    pickups = pickups.map((p) => {
-      const prior = priorByLoc.get(p.locationId)
-      return prior ? { ...p, scu: prior.scu, confirmed: true } : p
-    })
-    const mission: Mission = {
-      id: input.id ?? crypto.randomUUID(),
-      code: clampMissionCode(input.code ?? '') || formatMissionCode(1),
-      name: input.name,
-      haulType,
-      rank: input.rank?.trim() || undefined,
-      giver: input.giver?.trim() || undefined,
-      commodity: input.commodity,
-      rewardAuec: input.rewardAuec,
-      totalScu,
-      maxUnitScu,
-      pickups,
-      dropoffs,
-      source: input.source,
+  } else {
+    const totalScu = Math.max(1, Math.round(input.totalScu))
+    const shape = inferRouteShape(input.pickupIds.length, input.dropoffIds.length)
+
+    let pickups: MissionStop[]
+    let dropoffs: MissionStop[]
+
+    if (shape === 'multipleBoth') {
+      pickups = buildStops(input.pickupIds, totalScu, maxUnitScu)
+      dropoffs = buildDropoffs(input.dropoffIds, totalScu, maxUnitScu)
+    } else if (shape === 'multipleDropOff') {
+      pickups = [{ locationId: input.pickupIds[0], scu: totalScu, confirmed: false }]
+      dropoffs = buildDropoffs(input.dropoffIds, totalScu, maxUnitScu)
+    } else if (shape === 'multiplePickUp') {
+      pickups = buildStops(input.pickupIds, totalScu, maxUnitScu)
+      dropoffs = [{ locationId: input.dropoffIds[0], scu: totalScu }]
+    } else {
+      pickups = [{ locationId: input.pickupIds[0], scu: totalScu, confirmed: false }]
+      dropoffs = [{ locationId: input.dropoffIds[0], scu: totalScu }]
     }
-    return respreadUnconfirmed(mission)
+
+    objectives = [
+      createEmptyObjective({
+        commodity: input.commodity ?? '',
+        totalScu,
+        pickups,
+        dropoffs,
+      }),
+    ]
   }
 
-  return {
+  const base: Mission = {
     id: input.id ?? crypto.randomUUID(),
     code: clampMissionCode(input.code ?? '') || formatMissionCode(1),
     name: input.name,
@@ -344,12 +382,33 @@ export function createMission(input: {
     giver: input.giver?.trim() || undefined,
     commodity: input.commodity,
     rewardAuec: input.rewardAuec,
-    totalScu,
+    totalScu: Math.max(1, Math.round(input.totalScu) || 1),
     maxUnitScu,
-    pickups,
-    dropoffs,
+    pickups: [],
+    dropoffs: [],
+    objectives,
     source: input.source,
   }
+
+  let mission = withObjectiveAggregates(base)
+
+  // Restore confirmed actuals from a prior version of the same stops
+  if (input.priorPickups?.length) {
+    const priorByLoc = new Map(
+      input.priorPickups.filter((p) => p.confirmed).map((p) => [p.locationId, p]),
+    )
+    const nextObjectives = mission.objectives.map((o) => ({
+      ...o,
+      pickups: o.pickups.map((p) => {
+        const prior = priorByLoc.get(p.locationId)
+        return prior ? { ...p, scu: prior.scu, confirmed: true } : p
+      }),
+    }))
+    mission = withObjectiveAggregates({ ...mission, objectives: nextObjectives })
+    return respreadUnconfirmed(mission)
+  }
+
+  return mission
 }
 
 export function formatStopSummary(

@@ -14,8 +14,20 @@ import {
 } from './lib/scmdbDemo'
 import { syncGiversFromScmdb } from './store/catalog'
 import { useCatalog } from './hooks/useCatalog'
-import { loadAppCache, saveAppCache, type CapacityMode } from './lib/appCache'
+import {
+  loadAppCache,
+  saveAppCache,
+  syncDraftFromObjectives,
+  type CapacityMode,
+} from './lib/appCache'
 import { buildAutoMissionName } from './lib/haulTypes'
+import {
+  createEmptyObjective,
+  legacyMissionToObjectives,
+  missionCommodityLabel,
+  missionTotalScu,
+  objectiveRouteParts,
+} from './lib/objectives'
 import { parseMissionText, readMissionImage } from './lib/ocr'
 import { formatAuec, optimizeRoute } from './lib/optimizer'
 import {
@@ -139,21 +151,44 @@ export default function App() {
     if (!validDropoffs.length || validPickups.length !== draft.pickupIds.length) {
       const ruin = catalog.locations.find((l) => /Ruin Station/i.test(l.name))
       const star = catalog.locations.find((l) => /Starlight/i.test(l.name))
-      setDraft((d) => ({
-        ...d,
-        pickupIds: validPickups.length
+      setDraft((d) => {
+        const pickupIds = validPickups.length
           ? validPickups
           : star
             ? [star.id]
-            : d.pickupIds,
-        dropoffIds: validDropoffs.length
+            : d.pickupIds
+        const dropoffIds = validDropoffs.length
           ? validDropoffs
           : ruin
             ? [ruin.id]
             : catalog.locations[0]
               ? [catalog.locations[0].id]
-              : [],
-      }))
+              : []
+        const objectives = (d.objectives?.length
+          ? d.objectives
+          : [createEmptyObjective({ commodity: d.commodity, totalScu: d.totalScu })]
+        ).map((o, i) => {
+          if (i > 0) {
+            return {
+              ...o,
+              pickups: o.pickups.filter((p) => getLocation(p.locationId)),
+              dropoffs: o.dropoffs.filter((x) => getLocation(x.locationId)),
+            }
+          }
+          return {
+            ...o,
+            pickups: pickupIds.map((locationId) => {
+              const prev = o.pickups.find((p) => p.locationId === locationId)
+              return prev ?? { locationId, scu: 0 }
+            }),
+            dropoffs: dropoffIds.map((locationId) => {
+              const prev = o.dropoffs.find((x) => x.locationId === locationId)
+              return prev ?? { locationId, scu: 0 }
+            }),
+          }
+        })
+        return syncDraftFromObjectives({ ...d, pickupIds, dropoffIds, objectives })
+      })
     }
 
     // Only auto-seed demos on first visit — never after purge/remove
@@ -219,55 +254,59 @@ export default function App() {
   function fillDraftFromMission(m: Mission | null | undefined) {
     if (!m) {
       setDraftHaul(cached.draftHaul)
-      setDraft({
-        code: nextMissionCode(missions),
-        name: '',
-        giver: '',
-        rank: '',
-        pickupIds: [],
-        dropoffIds: [],
-        totalScu: 1,
-        maxUnitScu: DEFAULT_MAX_UNIT_SCU,
-        rewardAuec: 0,
-        commodity: '',
-        demo: false,
-      })
+      setDraft(
+        syncDraftFromObjectives({
+          code: nextMissionCode(missions),
+          name: '',
+          giver: '',
+          rank: '',
+          pickupIds: [],
+          dropoffIds: [],
+          totalScu: 1,
+          maxUnitScu: DEFAULT_MAX_UNIT_SCU,
+          rewardAuec: 0,
+          commodity: '',
+          objectives: [createEmptyObjective({ commodity: '', totalScu: 0 })],
+          demo: false,
+        }),
+      )
     } else {
       const isDemo = m.source === 'demo'
-      const pickupIds = m.pickups.map((p) => p.locationId)
-      const dropoffIds = m.dropoffs.map((d) => d.locationId)
-      const fromLabel = pickupIds[0] ? locationLabel(pickupIds[0]) : ''
-      const toLabel = dropoffIds.length
-        ? locationLabel(dropoffIds[dropoffIds.length - 1])
-        : ''
+      const objectives = legacyMissionToObjectives(m).map((o) =>
+        createEmptyObjective(o),
+      )
+      const route = objectiveRouteParts(objectives)
       setDraftHaul(m.haulType)
-      setDraft({
-        code: isDemo
-          ? nextDemoMissionCode(missions)
-          : draft.code || nextMissionCode(missions),
-        // Demo uses auto title with (DEMO) prefix; OCR/manual keep parsed name
-        name: isDemo
-          ? buildAutoMissionName({
-              giver: m.giver,
-              rank: m.rank,
-              haulType: m.haulType,
-              from: fromLabel,
-              to: toLabel,
-              pickupCount: pickupIds.length,
-              dropoffCount: dropoffIds.length,
-              demo: true,
-            })
-          : m.name,
-        giver: m.giver ?? '',
-        rank: m.rank ?? '',
-        pickupIds,
-        dropoffIds,
-        totalScu: m.totalScu,
-        maxUnitScu: normalizeCrateSize(m.maxUnitScu),
-        rewardAuec: m.rewardAuec ?? 0,
-        commodity: m.commodity ?? '',
-        demo: isDemo,
-      })
+      setDraft(
+        syncDraftFromObjectives({
+          code: isDemo
+            ? nextDemoMissionCode(missions)
+            : draft.code || nextMissionCode(missions),
+          // Demo uses auto title with (DEMO) prefix; OCR/manual keep parsed name
+          name: isDemo
+            ? buildAutoMissionName({
+                giver: m.giver,
+                rank: m.rank,
+                haulType: m.haulType,
+                from: route.from,
+                to: route.to,
+                pickupCount: route.pickupCount,
+                dropoffCount: route.dropoffCount,
+                demo: true,
+              })
+            : m.name,
+          giver: m.giver ?? '',
+          rank: m.rank ?? '',
+          pickupIds: [],
+          dropoffIds: [],
+          totalScu: missionTotalScu(objectives) || m.totalScu,
+          maxUnitScu: normalizeCrateSize(m.maxUnitScu),
+          rewardAuec: m.rewardAuec ?? 0,
+          commodity: missionCommodityLabel(objectives) || m.commodity || '',
+          objectives,
+          demo: isDemo,
+        }),
+      )
     }
     setOcrFormKey((k) => k + 1)
   }
@@ -280,8 +319,23 @@ export default function App() {
     if (modalStep !== 'add' || !ocrPending || ocrPending.applyToMissionId) return
     const item = ocrPending.items[ocrPending.index]
     const m = item?.missions[0]
+    const objs = m ? legacyMissionToObjectives(m) : []
     const sig = m
-      ? `${ocrPending.index}|${m.id}|${m.pickups.map((p) => p.locationId).join(',')}|${m.dropoffs.map((d) => d.locationId).join(',')}|${m.name}|${m.totalScu}`
+      ? [
+          ocrPending.index,
+          m.id,
+          m.name,
+          m.totalScu,
+          m.commodity ?? '',
+          m.maxUnitScu,
+          m.rewardAuec ?? 0,
+          objs
+            .map(
+              (o) =>
+                `${o.commodity}:${o.totalScu}:${o.pickups.map((p) => `${p.locationId}=${p.scu}`).join('+')}:${o.dropoffs.map((d) => `${d.locationId}=${d.scu}`).join('+')}`,
+            )
+            .join(';'),
+        ].join('|')
       : `${ocrPending.index}|empty|${item?.imageUrl ?? ''}`
     if (sig === lastOcrFillSig.current) return
     lastOcrFillSig.current = sig
@@ -293,14 +347,37 @@ export default function App() {
       ocrPending && !ocrPending.applyToMissionId
         ? ocrPending.items[ocrPending.index]?.missions[0]
         : undefined
-    // Prefer OCR-parsed stops (same as old preview confirm) — draft scalars may be edited
-    const pickupIds = scanned?.pickups.length
-      ? scanned.pickups.map((p) => p.locationId)
-      : draft.pickupIds
-    const dropoffIds = scanned?.dropoffs.length
-      ? scanned.dropoffs.map((d) => d.locationId)
-      : draft.dropoffIds
-    if (!pickupIds.length || !dropoffIds.length) return
+
+    const draftObjectives =
+      draft.objectives?.length > 0
+        ? draft.objectives.map((o) => createEmptyObjective(o))
+        : []
+    const scannedObjectives = scanned
+      ? legacyMissionToObjectives(scanned).map((o) => createEmptyObjective(o))
+      : []
+
+    // Prefer draft objectives when user edited; else OCR-parsed objectives
+    const useDraftStops = draftObjectives.some(
+      (o) => o.pickups.length > 0 && o.dropoffs.length > 0,
+    )
+    const objectives = useDraftStops
+      ? draftObjectives
+      : scannedObjectives.length
+        ? scannedObjectives
+        : draftObjectives
+
+    if (!objectives.some((o) => o.pickups.length > 0 && o.dropoffs.length > 0)) {
+      return
+    }
+
+    const route = objectiveRouteParts(objectives)
+    const total = Math.max(
+      1,
+      missionTotalScu(objectives) ||
+        Number(draft.totalScu) ||
+        scanned?.totalScu ||
+        1,
+    )
 
     const isDemo =
       Boolean(draft.demo) || draft.name.trim().startsWith('(DEMO)')
@@ -308,16 +385,14 @@ export default function App() {
       clampMissionCode(draft.code) ||
       (isDemo ? nextDemoMissionCode(missions) : nextMissionCode(missions))
     setMissions((prev) => {
-      const fromLabel = locationLabel(pickupIds[0])
-      const toLabel = locationLabel(dropoffIds[dropoffIds.length - 1])
       const autoName = buildAutoMissionName({
         giver: draft.giver.trim() || scanned?.giver,
         rank: draft.rank.trim() || scanned?.rank,
         haulType: draftHaul,
-        from: fromLabel,
-        to: toLabel,
-        pickupCount: pickupIds.length,
-        dropoffCount: dropoffIds.length,
+        from: route.from,
+        to: route.to,
+        pickupCount: route.pickupCount,
+        dropoffCount: route.dropoffCount,
         demo: isDemo,
       })
       const mission = createMission({
@@ -326,18 +401,24 @@ export default function App() {
           draft.name.trim() ||
           scanned?.name ||
           autoName ||
-          `Haul ${draft.totalScu} SCU → ${toLabel}`,
+          `Haul ${total} SCU → ${route.to}`,
         haulType: draftHaul,
         rank: draft.rank.trim() || scanned?.rank,
         giver: draft.giver.trim() || scanned?.giver,
-        pickupIds,
-        dropoffIds,
-        totalScu: Math.max(1, Number(draft.totalScu) || scanned?.totalScu || 1),
+        pickupIds: objectives.flatMap((o) => o.pickups.map((p) => p.locationId)),
+        dropoffIds: objectives.flatMap((o) =>
+          o.dropoffs.map((d) => d.locationId),
+        ),
+        totalScu: total,
         maxUnitScu: normalizeCrateSize(
           draft.maxUnitScu || scanned?.maxUnitScu || DEFAULT_MAX_UNIT_SCU,
         ),
         rewardAuec: Number(draft.rewardAuec) || scanned?.rewardAuec,
-        commodity: draft.commodity.trim() || scanned?.commodity,
+        commodity:
+          missionCommodityLabel(objectives) ||
+          draft.commodity.trim() ||
+          scanned?.commodity,
+        objectives,
         source: scanned ? 'ocr' : isDemo ? 'demo' : 'manual',
       })
       return [...prev, mission]
@@ -524,14 +605,24 @@ export default function App() {
 
   async function runOcr(
     file: File | Blob,
-    opts?: { reuseImageUrl?: string | null; applyToMissionId?: string | null },
+    opts?: {
+      reuseImageUrl?: string | null
+      applyToMissionId?: string | null
+      /** Drop onto existing preview — swap current batch item’s image. */
+      replaceCurrent?: boolean
+    },
   ) {
     ocrCancelRef.current = false
     setOcrBusy(true)
     setOcrProgress(0)
     setOcrStatus('Starting OCR…')
-    const reuse = opts?.reuseImageUrl
+    const replaceCurrent = Boolean(opts?.replaceCurrent && ocrPending?.items.length)
+    const reuse = replaceCurrent ? null : opts?.reuseImageUrl
+    const prevUrl = replaceCurrent
+      ? (ocrPending!.items[ocrPending!.index]?.imageUrl ?? null)
+      : null
     const imageUrl = reuse ?? URL.createObjectURL(file)
+    const updateInPlace = Boolean(reuse || replaceCurrent)
     const applyToMissionId =
       opts?.applyToMissionId !== undefined
         ? opts.applyToMissionId
@@ -543,7 +634,7 @@ export default function App() {
       setModalStep('add')
     }
 
-    if (!reuse) {
+    if (!updateInPlace) {
       setOcrPending({
         items: [],
         index: 0,
@@ -551,6 +642,18 @@ export default function App() {
         batchTotal: 1,
         batchDone: 0,
       })
+    } else if (replaceCurrent) {
+      setOcrPending((prev) => {
+        if (!prev?.items.length) return prev
+        const idx = prev.index
+        return {
+          ...prev,
+          items: prev.items.map((it, i) =>
+            i === idx ? { ...it, imageUrl, source: file } : it,
+          ),
+        }
+      })
+      if (prevUrl) URL.revokeObjectURL(prevUrl)
     }
 
     try {
@@ -560,26 +663,31 @@ export default function App() {
         setOcrProgress(p.progress)
       })
       if (ocrCancelRef.current) {
-        if (!reuse) URL.revokeObjectURL(imageUrl)
+        if (!updateInPlace) URL.revokeObjectURL(imageUrl)
         return
       }
-      // Rescan current batch item in place
-      if (reuse && ocrPending && ocrPending.items.length) {
-        const idx = ocrPending.index
+      // Rescan / replace current batch item in place
+      if (updateInPlace) {
         const coded = codeMissions(found, { applyToMissionId })
-        const nextItems = ocrPending.items.map((it, i) =>
-          i === idx
-            ? {
-                missions: coded,
-                regions,
-                text,
-                imageUrl: reuse,
-                source: file,
-              }
-            : it,
-        )
         lastOcrFillSig.current = ''
-        setOcrPending({ ...ocrPending, items: nextItems })
+        setOcrPending((prev) => {
+          if (!prev?.items.length) return prev
+          const idx = prev.index
+          return {
+            ...prev,
+            items: prev.items.map((it, i) =>
+              i === idx
+                ? {
+                    missions: coded,
+                    regions,
+                    text,
+                    imageUrl,
+                    source: file,
+                  }
+                : it,
+            ),
+          }
+        })
         setOcrStatus(found.length ? 'Scan filled into form' : 'No missions parsed')
         return
       }
@@ -597,11 +705,32 @@ export default function App() {
         { applyToMissionId, batchTotal: 1, batchDone: 1 },
       )
     } catch (err) {
-      if (!reuse) URL.revokeObjectURL(imageUrl)
+      if (!updateInPlace) URL.revokeObjectURL(imageUrl)
       setOcrStatus(err instanceof Error ? err.message : 'OCR failed')
     } finally {
       setOcrBusy(false)
     }
+  }
+
+  /** Drop onto the current screenshot — update that slot only. */
+  function replaceOcrCurrentImage(files: File[]) {
+    const images = files.filter(
+      (f) =>
+        f.type.startsWith('image/') ||
+        /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name),
+    )
+    if (!images.length || ocrBusy) return
+    if (ocrPending?.items.length) {
+      void runOcr(images[0], {
+        replaceCurrent: true,
+        applyToMissionId: ocrPending.applyToMissionId,
+      })
+      return
+    }
+    void runOcrFiles(images, {
+      applyToMissionId:
+        modalStep === 'edit' && editingMissionId ? editingMissionId : null,
+    })
   }
 
   /** Browse / drop — fill the form as each image finishes (streamed). */
@@ -1021,7 +1150,11 @@ export default function App() {
                 {missions.length === 0 && (
                   <li className="empty">No missions yet. Click Add to create one.</li>
                 )}
-                {missions.map((m) => (
+                {missions.map((m) => {
+                  const objs = legacyMissionToObjectives(m)
+                  const commodityLabel =
+                    missionCommodityLabel(objs) || m.commodity
+                  return (
                   <li key={m.id} className="mission-row selected mission-row-compact">
                     <div className="mission-main">
                       <strong>
@@ -1031,10 +1164,11 @@ export default function App() {
                         {m.giver ? <span className="tag">{m.giver}</span> : null}
                         {m.rank ? <span className="tag">{m.rank}</span> : null}
                         <span className="tag">{typeLabel(m.haulType)}</span>
-                        {m.totalScu} SCU
-                        {m.commodity ? ` ${m.commodity}` : ''}
+                        {missionTotalScu(objs) || m.totalScu} SCU
+                        {commodityLabel ? ` ${commodityLabel}` : ''}
                         {m.rewardAuec != null ? ` · ${formatAuec(m.rewardAuec)}` : ''}
                         {` · crate ${m.maxUnitScu}`}
+                        {objs.length > 1 ? ` · ${objs.length} objectives` : ''}
                       </p>
                       <p className="stops-line stops-compact">
                         <span className="lbl">In</span>{' '}
@@ -1064,7 +1198,8 @@ export default function App() {
                       </button>
                     </div>
                   </li>
-                ))}
+                  )
+                })}
               </ul>
             )}
           </section>
@@ -1174,6 +1309,7 @@ export default function App() {
                 modalStep === 'edit' && editingMissionId ? editingMissionId : null,
             })
           }}
+          onReplaceImage={replaceOcrCurrentImage}
           onRescan={rescanOcrPending}
           onAddAll={addOcrAll}
           onAddDemo={fillDraftFromDemo}

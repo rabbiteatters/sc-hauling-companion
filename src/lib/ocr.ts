@@ -18,7 +18,7 @@ import {
   parseHaulType,
 } from './haulTypes'
 import {
-  parseDeliverTotalScu,
+  parseAllDeliverLines,
   parseGiverName,
   parseRewardAmount,
   parseRewardAmountFromFull,
@@ -26,6 +26,7 @@ import {
   pickMaxCrateSize,
   reconstructHaulTitle,
 } from './ocrEnhance'
+import { createEmptyObjective } from './objectives'
 import {
   clampRegionMap,
   cropBlueScuBlob,
@@ -34,7 +35,7 @@ import {
   OCR_REGION_IDS,
   OCR_REGION_LABELS,
 } from './ocrRegions'
-import { DEFAULT_MAX_UNIT_SCU, createMission } from './spread'
+import { DEFAULT_MAX_UNIT_SCU, buildStops, createMission } from './spread'
 
 export interface OcrProgress {
   status: string
@@ -151,11 +152,26 @@ export async function readMissionImage(
 ): Promise<{ text: string; missions: Mission[]; regions: OcrRegionTexts }> {
   const map = clampRegionMap(regions ?? loadOcrRegions())
   const bitmap = await createImageBitmap(file)
+
+  // One continuum for the whole image: full pass + each region (not per Tesseract call).
+  const phaseCount = 1 + OCR_REGION_IDS.length
+  let phaseIndex = 0
+  let phaseLabel = 'Starting OCR…'
+  let lastProgress = 0
+  const report = (local = 0) => {
+    const frac = Math.min(1, Math.max(0, local))
+    // Never go backwards when a region runs multiple recognize passes.
+    const progress = Math.max(
+      lastProgress,
+      Math.min(0.99, (phaseIndex + frac) / phaseCount),
+    )
+    lastProgress = progress
+    onProgress?.({ status: phaseLabel, progress })
+  }
+
   const worker = await createWorker('eng', 1, {
     logger: (m) => {
-      if (m.status && typeof m.progress === 'number') {
-        onProgress?.({ status: m.status, progress: m.progress })
-      }
+      if (typeof m.progress === 'number') report(m.progress)
     },
   })
 
@@ -170,7 +186,9 @@ export async function readMissionImage(
     }
 
     // 1) Full image first — most reliable baseline
-    onProgress?.({ status: 'Reading image…', progress: 0.05 })
+    phaseIndex = 0
+    phaseLabel = 'Reading image…'
+    report(0)
     const fullResult = await worker.recognize(file)
     const fullText = (fullResult.data.text ?? '').trim()
     texts.full = fullText
@@ -184,10 +202,9 @@ export async function readMissionImage(
     // 2) Region crops — plain upscale; reward/info get soft enhance retries
     let step = 0
     for (const key of OCR_REGION_IDS) {
-      onProgress?.({
-        status: `Reading ${OCR_REGION_LABELS[key]}…`,
-        progress: 0.15 + (step / OCR_REGION_IDS.length) * 0.75,
-      })
+      phaseIndex = 1 + step
+      phaseLabel = `Reading ${OCR_REGION_LABELS[key]}…`
+      report(0)
       try {
         if (key === 'reward') {
           texts.reward = await readRewardRegion(worker, bitmap, map.reward)
@@ -208,6 +225,7 @@ export async function readMissionImage(
       }
       step += 1
     }
+    onProgress?.({ status: 'Parsing…', progress: 1 })
 
     // Keep raw reward crop for preview (region already covers the full amount).
     // Parse falls back to full image only if the crop amount can’t be read.
@@ -344,9 +362,40 @@ function placeKey(raw: string): string {
 }
 
 /**
+ * Deliver → Collect → Deliver → Collect … (2+ of each).
+ * Same place names on separate legs are normal — not the Nyx duplicate quirk.
+ */
+function isAlternatingDeliverCollectOrder(objText: string): boolean {
+  const events: { index: number; kind: 'deliver' | 'collect' }[] = []
+  const pushAll = (re: RegExp, kind: 'deliver' | 'collect') => {
+    re.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = re.exec(objText)) !== null) {
+      events.push({ index: m.index, kind })
+    }
+  }
+  pushAll(/del[il1]ver/gi, 'deliver')
+  pushAll(/col+ect/gi, 'collect')
+  pushAll(/freight\s+elevator/gi, 'collect')
+  events.sort((a, b) => a.index - b.index || (a.kind === 'deliver' ? -1 : 1))
+  if (events.length < 4) return false
+  for (let i = 0; i < events.length; i++) {
+    const expect = i % 2 === 0 ? 'deliver' : 'collect'
+    if (events[i].kind !== expect) return false
+  }
+  let delivers = 0
+  let collects = 0
+  for (const e of events) {
+    if (e.kind === 'deliver') delivers += 1
+    else collects += 1
+  }
+  return delivers >= 2 && collects >= 2
+}
+
+/**
  * Collect place strings in order from objectives.
- * Keeps duplicate names (2nd “Checkmate” → Nyx). Does not use broad “from X”
- * alongside Collect lines (that caused false Nyx).
+ * Keeps duplicate names (2nd “Checkmate” → Nyx) unless D↔C alternating order.
+ * Does not use broad “from X” alongside Collect lines (that caused false Nyx).
  */
 function extractPickupRaws(objText: string): string[] {
   const raws: string[] = []
@@ -377,10 +426,11 @@ function extractPickupRaws(objText: string): string[] {
 
 function findPickupsInText(
   objText: string,
-  dropoffId: string,
+  dropoffIds: string[],
   /** 2nd identical collect name → Nyx (objectives crop only). */
   nyxOnDuplicateCollect: boolean,
 ): string[] {
+  const dropSet = new Set(dropoffIds.filter(Boolean))
   const pickupIds: string[] = []
   const seenPlaceKeys = new Set<string>()
   const nyx = getNyxGatewayPyro()
@@ -390,7 +440,7 @@ function findPickupsInText(
     const key = placeKey(raw)
     // In-game quirk: same collect place listed twice → 2nd is Nyx Gateway (Pyro)
     if (nyxOnDuplicateCollect && key && seenPlaceKeys.has(key)) {
-      if (nyx.id !== dropoffId && !pickupIds.includes(nyx.id)) {
+      if (!dropSet.has(nyx.id) && !pickupIds.includes(nyx.id)) {
         pickupIds.push(nyx.id)
       }
       continue
@@ -398,16 +448,16 @@ function findPickupsInText(
     if (key) seenPlaceKeys.add(key)
 
     const loc = resolveContractLocation(raw, ctx)
-    if (loc.id !== dropoffId && !pickupIds.includes(loc.id)) {
+    if (!dropSet.has(loc.id) && !pickupIds.includes(loc.id)) {
       pickupIds.push(loc.id)
     }
   }
 
-  // Last resort: catalog names mentioned in objectives (excluding dropoff) — no Nyx
+  // Last resort: catalog names mentioned in objectives (excluding dropoffs) — no Nyx
   if (!pickupIds.length) {
     const lower = objText.toLowerCase()
     for (const loc of getAllLocations()) {
-      if (loc.id === dropoffId) continue
+      if (dropSet.has(loc.id)) continue
       const names = [loc.shortName, loc.name, ...(loc.aliases ?? [])]
       for (const name of names) {
         if (!name || name.length < 4) continue
@@ -436,29 +486,46 @@ function parseStellarHaul(
   const infoText = regions?.info?.trim() || ''
 
   const objectivesCrop = objectivesCropOnly(regions)
-  const deliver =
-    parseDeliverTotalScu(objectivesCrop) ??
-    parseDeliverTotalScu(objText) ??
-    parseDeliverTotalScu(fullFallback) ??
-    parseDeliverTotalScu(text)
-  if (!deliver) return null
+  let delivers = parseAllDeliverLines(objectivesCrop)
+  if (!delivers.length) delivers = parseAllDeliverLines(objText)
+  if (!delivers.length) delivers = parseAllDeliverLines(fullFallback)
+  if (!delivers.length) delivers = parseAllDeliverLines(text)
+  if (!delivers.length) return null
 
-  const { totalScu, commodity, dropRaw } = deliver
-  const dropoff = resolveContractLocation(
-    dropRaw,
-    createLocationResolveCtx({ nyxOnDuplicate: false }),
-  )
+  const dropCtx = createLocationResolveCtx({ nyxOnDuplicate: false })
+  const dropoffs: { locationId: string; scu: number; shortName: string }[] = []
+  for (const d of delivers) {
+    const loc = resolveContractLocation(d.dropRaw, dropCtx)
+    const existing = dropoffs.find((x) => x.locationId === loc.id)
+    if (existing) {
+      existing.scu += d.totalScu
+    } else {
+      dropoffs.push({
+        locationId: loc.id,
+        scu: d.totalScu,
+        shortName: loc.shortName,
+      })
+    }
+  }
+  if (!dropoffs.length) return null
 
-  // Nyx quirk: 2nd identical *collect* name in OBJECTIVES → Nyx Gateway (Pyro)
+  const totalScu = dropoffs.reduce((s, d) => s + d.scu, 0)
+  const commodity = delivers[0].commodity
+  const dropoffIds = dropoffs.map((d) => d.locationId)
+  const primaryDrop = dropoffs[0]
+
+  // Nyx quirk: 2nd identical *collect* name in OBJECTIVES → Nyx Gateway (Pyro).
+  // Skip when objectives alternate Deliver/Collect/Deliver/Collect (multi-leg).
   const pickupIds: string[] = []
   if (objectivesCrop) {
-    pickupIds.push(...findPickupsInText(objectivesCrop, dropoff.id, true))
+    const nyxOnDup = !isAlternatingDeliverCollectOrder(objectivesCrop)
+    pickupIds.push(...findPickupsInText(objectivesCrop, dropoffIds, nyxOnDup))
   }
   if (!pickupIds.length) {
     const fallbackText =
       objectivesCrop && objectivesCrop !== fullFallback ? fullFallback : objText
     if (fallbackText && fallbackText !== objectivesCrop) {
-      pickupIds.push(...findPickupsInText(fallbackText, dropoff.id, false))
+      pickupIds.push(...findPickupsInText(fallbackText, dropoffIds, false))
     }
   }
   if (!pickupIds.length) return null
@@ -479,19 +546,25 @@ function parseStellarHaul(
 
   const rawTitle =
     reconstructHaulTitle(titleText) || reconstructHaulTitle(fullFallback)
+  const destLabel = dropoffs.length > 1 ? 'MULTI' : primaryDrop.shortName
   const name =
-    alignTitleDestination(rawTitle, dropoff.shortName) ||
-    `Stellar Haul | ${totalScu} SCU ${commodity} → ${dropoff.shortName}`
+    alignTitleDestination(rawTitle, destLabel) ||
+    `Stellar Haul | ${totalScu} SCU ${commodity} → ${destLabel}`
 
   const haulType: HaulType =
     parseHaulType(titleText || name) ??
     parseHaulType(name) ??
-    inferHaulType(pickupIds.length, 1, name) ??
+    inferHaulType(pickupIds.length, dropoffs.length, name) ??
     DEFAULT_HAUL_TYPE
 
   const giver =
     parseGiverName(giverText, { regionCrop: true }) ??
     parseGiverName(fullFallback, { regionCrop: false })
+
+  const pickups =
+    pickupIds.length === 1
+      ? [{ locationId: pickupIds[0], scu: totalScu, confirmed: false }]
+      : buildStops(pickupIds, totalScu, maxUnitScu)
 
   return createMission({
     name,
@@ -503,8 +576,19 @@ function parseStellarHaul(
     maxUnitScu,
     rewardAuec: reward,
     pickupIds,
-    dropoffIds: [dropoff.id],
+    dropoffIds,
     source: 'ocr',
+    objectives: [
+      createEmptyObjective({
+        commodity,
+        totalScu,
+        pickups,
+        dropoffs: dropoffs.map((d) => ({
+          locationId: d.locationId,
+          scu: d.scu,
+        })),
+      }),
+    ],
   })
 }
 
