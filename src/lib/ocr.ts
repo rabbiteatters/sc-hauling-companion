@@ -151,11 +151,26 @@ export async function readMissionImage(
 ): Promise<{ text: string; missions: Mission[]; regions: OcrRegionTexts }> {
   const map = clampRegionMap(regions ?? loadOcrRegions())
   const bitmap = await createImageBitmap(file)
+
+  // One continuum for the whole image: full pass + each region (not per Tesseract call).
+  const phaseCount = 1 + OCR_REGION_IDS.length
+  let phaseIndex = 0
+  let phaseLabel = 'Starting OCR…'
+  let lastProgress = 0
+  const report = (local = 0) => {
+    const frac = Math.min(1, Math.max(0, local))
+    // Never go backwards when a region runs multiple recognize passes.
+    const progress = Math.max(
+      lastProgress,
+      Math.min(0.99, (phaseIndex + frac) / phaseCount),
+    )
+    lastProgress = progress
+    onProgress?.({ status: phaseLabel, progress })
+  }
+
   const worker = await createWorker('eng', 1, {
     logger: (m) => {
-      if (m.status && typeof m.progress === 'number') {
-        onProgress?.({ status: m.status, progress: m.progress })
-      }
+      if (typeof m.progress === 'number') report(m.progress)
     },
   })
 
@@ -170,7 +185,9 @@ export async function readMissionImage(
     }
 
     // 1) Full image first — most reliable baseline
-    onProgress?.({ status: 'Reading image…', progress: 0.05 })
+    phaseIndex = 0
+    phaseLabel = 'Reading image…'
+    report(0)
     const fullResult = await worker.recognize(file)
     const fullText = (fullResult.data.text ?? '').trim()
     texts.full = fullText
@@ -184,10 +201,9 @@ export async function readMissionImage(
     // 2) Region crops — plain upscale; reward/info get soft enhance retries
     let step = 0
     for (const key of OCR_REGION_IDS) {
-      onProgress?.({
-        status: `Reading ${OCR_REGION_LABELS[key]}…`,
-        progress: 0.15 + (step / OCR_REGION_IDS.length) * 0.75,
-      })
+      phaseIndex = 1 + step
+      phaseLabel = `Reading ${OCR_REGION_LABELS[key]}…`
+      report(0)
       try {
         if (key === 'reward') {
           texts.reward = await readRewardRegion(worker, bitmap, map.reward)
@@ -208,6 +224,7 @@ export async function readMissionImage(
       }
       step += 1
     }
+    onProgress?.({ status: 'Parsing…', progress: 1 })
 
     // Keep raw reward crop for preview (region already covers the full amount).
     // Parse falls back to full image only if the crop amount can’t be read.
@@ -344,9 +361,40 @@ function placeKey(raw: string): string {
 }
 
 /**
+ * Deliver → Collect → Deliver → Collect … (2+ of each).
+ * Same place names on separate legs are normal — not the Nyx duplicate quirk.
+ */
+function isAlternatingDeliverCollectOrder(objText: string): boolean {
+  const events: { index: number; kind: 'deliver' | 'collect' }[] = []
+  const pushAll = (re: RegExp, kind: 'deliver' | 'collect') => {
+    re.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = re.exec(objText)) !== null) {
+      events.push({ index: m.index, kind })
+    }
+  }
+  pushAll(/del[il1]ver/gi, 'deliver')
+  pushAll(/col+ect/gi, 'collect')
+  pushAll(/freight\s+elevator/gi, 'collect')
+  events.sort((a, b) => a.index - b.index || (a.kind === 'deliver' ? -1 : 1))
+  if (events.length < 4) return false
+  for (let i = 0; i < events.length; i++) {
+    const expect = i % 2 === 0 ? 'deliver' : 'collect'
+    if (events[i].kind !== expect) return false
+  }
+  let delivers = 0
+  let collects = 0
+  for (const e of events) {
+    if (e.kind === 'deliver') delivers += 1
+    else collects += 1
+  }
+  return delivers >= 2 && collects >= 2
+}
+
+/**
  * Collect place strings in order from objectives.
- * Keeps duplicate names (2nd “Checkmate” → Nyx). Does not use broad “from X”
- * alongside Collect lines (that caused false Nyx).
+ * Keeps duplicate names (2nd “Checkmate” → Nyx) unless D↔C alternating order.
+ * Does not use broad “from X” alongside Collect lines (that caused false Nyx).
  */
 function extractPickupRaws(objText: string): string[] {
   const raws: string[] = []
@@ -449,10 +497,12 @@ function parseStellarHaul(
     createLocationResolveCtx({ nyxOnDuplicate: false }),
   )
 
-  // Nyx quirk: 2nd identical *collect* name in OBJECTIVES → Nyx Gateway (Pyro)
+  // Nyx quirk: 2nd identical *collect* name in OBJECTIVES → Nyx Gateway (Pyro).
+  // Skip when objectives alternate Deliver/Collect/Deliver/Collect (multi-leg).
   const pickupIds: string[] = []
   if (objectivesCrop) {
-    pickupIds.push(...findPickupsInText(objectivesCrop, dropoff.id, true))
+    const nyxOnDup = !isAlternatingDeliverCollectOrder(objectivesCrop)
+    pickupIds.push(...findPickupsInText(objectivesCrop, dropoff.id, nyxOnDup))
   }
   if (!pickupIds.length) {
     const fallbackText =

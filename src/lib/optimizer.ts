@@ -4,8 +4,9 @@
  * Splits into trips only when total cargo exceeds hold capacity.
  */
 
+import { legacyMissionToObjectives, missionTotalScu } from './objectives'
 import { distanceBetween, getLocation } from '../store/catalog'
-import type { Mission, OptimizedRoute, RouteStop } from '../types'
+import type { Mission, MissionObjective, OptimizedRoute, RouteStop } from '../types'
 
 interface CargoJob {
   id: string
@@ -14,6 +15,7 @@ interface CargoJob {
   pickupId: string
   dropoffId: string
   scu: number
+  commodity?: string
 }
 
 const EXACT_NODE_MAX = 14
@@ -34,8 +36,11 @@ export function optimizeRoute(
   const planned = planJobs(jobs, startLocationId, capacityScu)
   if (!planned) return emptyRoute(capacityScu, missions)
 
-  const reward = missions.reduce((s, m) => s + (m.rewardAuec ?? m.totalScu * 1000), 0)
-  const cargo = missions.reduce((s, m) => s + m.totalScu, 0)
+  const reward = missions.reduce((s, m) => {
+    const total = missionCargoTotal(m)
+    return s + (m.rewardAuec ?? total * 1000)
+  }, 0)
+  const cargo = missions.reduce((s, m) => s + missionCargoTotal(m), 0)
 
   return {
     selectedMissionIds: missions.map((m) => m.id),
@@ -66,80 +71,107 @@ function emptyRoute(capacityScu: number, missions: Mission[] = []): OptimizedRou
   }
 }
 
+function missionCargoTotal(m: Mission): number {
+  const objs = legacyMissionToObjectives(m)
+  const sum = missionTotalScu(objs)
+  return sum > 0 ? sum : m.totalScu
+}
+
 function isFeasible(m: Mission, capacity: number): boolean {
-  if (capacity < 1 || m.totalScu <= 0) return false
-  if (!m.pickups.length || !m.dropoffs.length) return false
-  return (
-    m.pickups.every((p) => getLocation(p.locationId)) &&
-    m.dropoffs.every((d) => getLocation(d.locationId))
+  if (capacity < 1 || missionCargoTotal(m) <= 0) return false
+  const objectives = legacyMissionToObjectives(m)
+  if (!objectives.some((o) => o.pickups.length && o.dropoffs.length)) return false
+  return objectives.every(
+    (o) =>
+      o.pickups.every((p) => getLocation(p.locationId)) &&
+      o.dropoffs.every((d) => getLocation(d.locationId)),
   )
+}
+
+function expandObjectiveJobs(
+  m: Mission,
+  obj: MissionObjective,
+  objIndex: number,
+): CargoJob[] {
+  const jobs: CargoJob[] = []
+  const commodity = obj.commodity.trim() || m.commodity
+  const prefix = `${m.id}:o${objIndex}`
+
+  if (obj.pickups.length > 1 && obj.dropoffs.length > 1) {
+    const dropTotal = obj.dropoffs.reduce((s, d) => s + Math.max(0, d.scu), 0)
+    for (const p of obj.pickups) {
+      if (p.scu <= 0) continue
+      if (dropTotal <= 0) {
+        const dest = obj.dropoffs[0]
+        jobs.push({
+          id: `${prefix}:${p.locationId}->${dest.locationId}`,
+          missionId: m.id,
+          missionName: m.name,
+          pickupId: p.locationId,
+          dropoffId: dest.locationId,
+          scu: p.scu,
+          commodity,
+        })
+        continue
+      }
+      let assigned = 0
+      obj.dropoffs.forEach((d, di) => {
+        const isLast = di === obj.dropoffs.length - 1
+        const share = isLast
+          ? p.scu - assigned
+          : Math.round((p.scu * Math.max(0, d.scu)) / dropTotal)
+        assigned += share
+        if (share <= 0) return
+        jobs.push({
+          id: `${prefix}:${p.locationId}->${d.locationId}`,
+          missionId: m.id,
+          missionName: m.name,
+          pickupId: p.locationId,
+          dropoffId: d.locationId,
+          scu: share,
+          commodity,
+        })
+      })
+    }
+  } else if (obj.pickups.length >= 1 && obj.dropoffs.length === 1) {
+    const dest = obj.dropoffs[0].locationId
+    for (const p of obj.pickups) {
+      if (p.scu <= 0) continue
+      jobs.push({
+        id: `${prefix}:${p.locationId}->${dest}`,
+        missionId: m.id,
+        missionName: m.name,
+        pickupId: p.locationId,
+        dropoffId: dest,
+        scu: p.scu,
+        commodity,
+      })
+    }
+  } else if (obj.pickups.length === 1 && obj.dropoffs.length >= 1) {
+    const src = obj.pickups[0].locationId
+    for (const d of obj.dropoffs) {
+      if (d.scu <= 0) continue
+      jobs.push({
+        id: `${prefix}:${src}->${d.locationId}`,
+        missionId: m.id,
+        missionName: m.name,
+        pickupId: src,
+        dropoffId: d.locationId,
+        scu: d.scu,
+        commodity,
+      })
+    }
+  }
+  return jobs
 }
 
 function expandJobs(missions: Mission[]): CargoJob[] {
   const jobs: CargoJob[] = []
   for (const m of missions) {
-    if (m.pickups.length > 1 && m.dropoffs.length > 1) {
-      // Multi→multi: split each pickup across dropoffs by dropoff share
-      const dropTotal = m.dropoffs.reduce((s, d) => s + Math.max(0, d.scu), 0)
-      for (const p of m.pickups) {
-        if (p.scu <= 0) continue
-        if (dropTotal <= 0) {
-          const dest = m.dropoffs[0]
-          jobs.push({
-            id: `${m.id}:${p.locationId}->${dest.locationId}`,
-            missionId: m.id,
-            missionName: m.name,
-            pickupId: p.locationId,
-            dropoffId: dest.locationId,
-            scu: p.scu,
-          })
-          continue
-        }
-        let assigned = 0
-        m.dropoffs.forEach((d, di) => {
-          const isLast = di === m.dropoffs.length - 1
-          const share = isLast
-            ? p.scu - assigned
-            : Math.round((p.scu * Math.max(0, d.scu)) / dropTotal)
-          assigned += share
-          if (share <= 0) return
-          jobs.push({
-            id: `${m.id}:${p.locationId}->${d.locationId}`,
-            missionId: m.id,
-            missionName: m.name,
-            pickupId: p.locationId,
-            dropoffId: d.locationId,
-            scu: share,
-          })
-        })
-      }
-    } else if (m.pickups.length >= 1 && m.dropoffs.length === 1) {
-      const dest = m.dropoffs[0].locationId
-      for (const p of m.pickups) {
-        if (p.scu <= 0) continue
-        jobs.push({
-          id: `${m.id}:${p.locationId}->${dest}`,
-          missionId: m.id,
-          missionName: m.name,
-          pickupId: p.locationId,
-          dropoffId: dest,
-          scu: p.scu,
-        })
-      }
-    } else if (m.pickups.length === 1 && m.dropoffs.length >= 1) {
-      const src = m.pickups[0].locationId
-      for (const d of m.dropoffs) {
-        if (d.scu <= 0) continue
-        jobs.push({
-          id: `${m.id}:${src}->${d.locationId}`,
-          missionId: m.id,
-          missionName: m.name,
-          pickupId: src,
-          dropoffId: d.locationId,
-          scu: d.scu,
-        })
-      }
-    }
+    const objectives = legacyMissionToObjectives(m)
+    objectives.forEach((obj, i) => {
+      jobs.push(...expandObjectiveJobs(m, obj, i))
+    })
   }
   return jobs.filter((j) => getLocation(j.pickupId) && getLocation(j.dropoffId))
 }
@@ -560,11 +592,12 @@ function materialize(
         legDistance: first ? leg : 0,
         trip,
         stopRemaining: 0,
+        commodity: head.commodity,
       })
       first = false
     }
 
-    // One pickup line per mission at this location
+    // One pickup line per mission+commodity at this location
     const pickGroups = groupJobsByMission(picks)
     for (const group of pickGroups) {
       const scu = group.reduce((s, j) => s + j.scu, 0)
@@ -582,6 +615,7 @@ function materialize(
         legDistance: first ? leg : 0,
         trip,
         stopRemaining: 0,
+        commodity: head.commodity,
       })
       first = false
     }
@@ -642,9 +676,10 @@ function materialize(
 function groupJobsByMission(jobs: JobMap[]): JobMap[][] {
   const map = new Map<string, JobMap[]>()
   for (const j of jobs) {
-    const list = map.get(j.missionId) ?? []
+    const key = `${j.missionId}|${j.commodity ?? ''}`
+    const list = map.get(key) ?? []
     list.push(j)
-    map.set(j.missionId, list)
+    map.set(key, list)
   }
   return [...map.values()]
 }

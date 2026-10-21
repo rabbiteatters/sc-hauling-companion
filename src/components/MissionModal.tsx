@@ -1,24 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  buildAutoMissionName,
-  MAX_HAUL_STOPS,
-  reconcileHaulStops,
-} from '../lib/haulTypes'
+import { buildAutoMissionName } from '../lib/haulTypes'
 import type { OcrRegionTexts } from '../lib/ocr'
 import {
   CRATE_SIZES,
   createMission,
   normalizeCrateSize,
 } from '../lib/spread'
+import {
+  createEmptyObjective,
+  legacyMissionToObjectives,
+  objectiveRouteParts,
+  type DraftObjective,
+} from '../lib/objectives'
+import { syncDraftFromObjectives, type DraftCache } from '../lib/appCache'
 import { OCR_REGION_IDS, OCR_REGION_LABELS } from '../lib/ocrRegions'
-import { locationLabel } from '../store/catalog'
 import type { HaulType, Location, Mission } from '../types'
-import type { DraftCache } from '../lib/appCache'
 import type { CommodityInfo } from '../api/uex'
-import { CommodityPicker } from './CommodityPicker'
 import { GiverPicker } from './GiverPicker'
 import { HaulTypePicker } from './HaulTypePicker'
-import { LocationPicker } from './LocationPicker'
+import { ObjectivesEditor } from './ObjectivesEditor'
 import { OcrRegionSetup } from './OcrRegionSetup'
 import { RankPicker } from './RankPicker'
 
@@ -45,14 +45,46 @@ type MissionFormSnap = {
   giver: string
   rank: string
   haulType: HaulType
-  totalScu: number
   maxUnitScu: number
   rewardAuec: number
-  commodity: string
-  pickupIds: string[]
-  dropoffIds: string[]
+  objectives: DraftObjective[]
   nameAuto: boolean
   demo: boolean
+}
+
+function cloneObjectives(list: DraftObjective[]): DraftObjective[] {
+  return list.map((o) =>
+    createEmptyObjective({
+      id: o.id,
+      commodity: o.commodity,
+      totalScu: o.totalScu,
+      pickups: o.pickups.map((p) => ({ ...p })),
+      dropoffs: o.dropoffs.map((d) => ({ ...d })),
+    }),
+  )
+}
+
+function autoNameFromObjectives(
+  objectives: DraftObjective[],
+  parts: {
+    giver?: string
+    rank?: string
+    haulType?: string
+    demo?: boolean
+  },
+): string {
+  const route = objectiveRouteParts(objectives)
+  return buildAutoMissionName({
+    ...parts,
+    from: route.from,
+    to: route.to,
+    pickupCount: route.pickupCount,
+    dropoffCount: route.dropoffCount,
+  })
+}
+
+function objectivesHaveStops(objectives: DraftObjective[]): boolean {
+  return objectives.some((o) => o.pickups.length > 0 && o.dropoffs.length > 0)
 }
 
 function formSnapKey(s: MissionFormSnap): string {
@@ -118,6 +150,8 @@ interface Props {
   onImportPaste: () => void
   onBrowse: () => void
   onDropFiles: (files: File[]) => void
+  /** Drop onto existing screenshot preview — replace current image. */
+  onReplaceImage?: (files: File[]) => void
   onRescan?: () => void
   onAddAll?: () => void
   /** Fill the add form with one demo sample (not saved until Add) */
@@ -156,6 +190,7 @@ export function MissionModal({
   onImportPaste,
   onBrowse,
   onDropFiles,
+  onReplaceImage,
   onRescan,
   onAddAll,
   onAddDemo,
@@ -229,18 +264,10 @@ export function MissionModal({
     d: DraftCache = draft,
     haul: HaulType = draftHaul,
   ): string {
-    const from = d.pickupIds[0] ? locationLabel(d.pickupIds[0]) : ''
-    const to = d.dropoffIds.length
-      ? locationLabel(d.dropoffIds[d.dropoffIds.length - 1])
-      : ''
-    return buildAutoMissionName({
+    return autoNameFromObjectives(d.objectives ?? [], {
       giver: d.giver,
       rank: d.rank,
       haulType: haul,
-      from,
-      to,
-      pickupCount: d.pickupIds.length,
-      dropoffCount: d.dropoffIds.length,
       demo: Boolean(d.demo),
     })
   }
@@ -252,12 +279,9 @@ export function MissionModal({
       giver: draft.giver,
       rank: draft.rank,
       haulType: draftHaul,
-      totalScu: draft.totalScu,
       maxUnitScu: draft.maxUnitScu,
       rewardAuec: draft.rewardAuec,
-      commodity: draft.commodity,
-      pickupIds: [...draft.pickupIds],
-      dropoffIds: [...draft.dropoffIds],
+      objectives: cloneObjectives(draft.objectives ?? []),
       nameAuto,
       demo: Boolean(draft.demo),
     }
@@ -268,19 +292,22 @@ export function MissionModal({
     setNameAuto(s.nameAuto)
     lastAutoNameRef.current = s.nameAuto ? s.name : ''
     onDraftHaul(s.haulType)
-    onDraft(() => ({
-      code: s.code,
-      name: s.name,
-      giver: s.giver,
-      rank: s.rank,
-      pickupIds: [...s.pickupIds],
-      dropoffIds: [...s.dropoffIds],
-      totalScu: s.totalScu,
-      maxUnitScu: s.maxUnitScu,
-      rewardAuec: s.rewardAuec,
-      commodity: s.commodity,
-      demo: s.demo,
-    }))
+    onDraft(() =>
+      syncDraftFromObjectives({
+        code: s.code,
+        name: s.name,
+        giver: s.giver,
+        rank: s.rank,
+        pickupIds: [],
+        dropoffIds: [],
+        totalScu: 1,
+        maxUnitScu: s.maxUnitScu,
+        rewardAuec: s.rewardAuec,
+        commodity: '',
+        objectives: cloneObjectives(s.objectives),
+        demo: s.demo,
+      }),
+    )
     queueMicrotask(() => {
       applyingHistory.current = false
     })
@@ -305,9 +332,27 @@ export function MissionModal({
 
   function noteFormEdit() {
     if (applyingHistory.current || step !== 'add') return
-    if (!debounceBase.current) debounceBase.current = currentAddSnap()
+    if (!debounceBase.current) {
+      debounceBase.current = currentAddSnap()
+      setHistTick((t) => t + 1)
+    }
     if (debounceTimer.current) clearTimeout(debounceTimer.current)
     debounceTimer.current = setTimeout(() => flushFormHistory(), 450)
+  }
+
+  /** Immediate undo step for discrete objective edits (add/remove/reorder/locations). */
+  function commitDraft(updater: (d: DraftCache) => DraftCache) {
+    if (applyingHistory.current || step !== 'add') {
+      onDraft(updater)
+      return
+    }
+    flushFormHistory()
+    const before = currentAddSnap()
+    onDraft(updater)
+    undoStack.current = [...undoStack.current, before].slice(-FORM_UNDO_LIMIT)
+    redoStack.current = []
+    debounceBase.current = null
+    setHistTick((t) => t + 1)
   }
 
   function currentTitleCode(): string {
@@ -498,8 +543,7 @@ export function MissionModal({
     draft.rank,
     draft.demo,
     draftHaul,
-    draft.pickupIds,
-    draft.dropoffIds,
+    draft.objectives,
     draft.name,
     onDraft,
   ])
@@ -766,22 +810,6 @@ export function MissionModal({
         </div>
 
         <div className="mission-modal-body">
-          {(ocrBusy || (batchTotal > 0 && batchDone < batchTotal)) && (
-            <div className="ocr-progress-block">
-              <div className="ocr-progress-bar" aria-hidden>
-                <i style={{ width: `${progressPct}%` }} />
-              </div>
-              <p className="ocr-status">
-                {ocrStatus || 'Scanning…'}
-                {batchTotal > 1
-                  ? ` · ${batchDone}/${batchTotal}`
-                  : progressPct > 0
-                    ? ` · ${progressPct}%`
-                    : ''}
-              </p>
-            </div>
-          )}
-
           {step === 'add' && (
             <div className="add-mission-combined">
               <OcrUploadBlock
@@ -789,8 +817,12 @@ export function MissionModal({
                 onToggleRegions={() => setRegionsOpen((v) => !v)}
                 ocrBusy={ocrBusy}
                 progressPct={progressPct}
+                ocrStatus={ocrStatus}
+                batchTotal={batchTotal}
+                batchDone={batchDone}
                 onBrowse={onBrowse}
                 onDropFiles={onDropFiles}
+                onReplaceImage={onReplaceImage}
                 pasteOpen={pasteOpen}
                 pasteText={pasteText}
                 onPasteOpen={onPasteOpen}
@@ -813,39 +845,25 @@ export function MissionModal({
                 giver={draft.giver}
                 rank={draft.rank}
                 showGiver
-                totalScu={draft.totalScu}
                 maxUnitScu={draft.maxUnitScu}
                 rewardAuec={draft.rewardAuec}
-                commodity={draft.commodity}
-                pickupIds={draft.pickupIds}
-                dropoffIds={draft.dropoffIds}
+                objectives={draft.objectives ?? []}
                 locations={locations}
                 commodities={commodities}
                 givers={givers}
                 onHaulType={patchHaul}
                 onGiver={(giver) => patchDraft((d) => ({ ...d, giver }))}
                 onRank={(rank) => patchDraft((d) => ({ ...d, rank }))}
-                onTotalScu={(totalScu) => patchDraft((d) => ({ ...d, totalScu }))}
                 onMaxUnitScu={(maxUnitScu) =>
                   patchDraft((d) => ({ ...d, maxUnitScu }))
                 }
                 onRewardAuec={(rewardAuec) =>
                   patchDraft((d) => ({ ...d, rewardAuec }))
                 }
-                onCommodity={(commodity) =>
-                  patchDraft((d) => ({ ...d, commodity }))
-                }
-                onPickupIds={(pickupIds) =>
-                  patchDraft((d) => ({
-                    ...d,
-                    ...reconcileHaulStops(pickupIds, d.dropoffIds, 'pickup'),
-                  }))
-                }
-                onDropoffIds={(dropoffIds) =>
-                  patchDraft((d) => ({
-                    ...d,
-                    ...reconcileHaulStops(d.pickupIds, dropoffIds, 'dropoff'),
-                  }))
+                onObjectives={(objectives) =>
+                  commitDraft((d) =>
+                    syncDraftFromObjectives({ ...d, objectives }),
+                  )
                 }
                 primaryLabel={
                   multi && readyCount > 1 ? 'Add & next' : 'Add mission'
@@ -880,6 +898,7 @@ export function MissionModal({
               scanBusy={ocrBusy}
               codeInvalid={Boolean(codeError)}
               onScanFile={(file) => onDropFiles([file])}
+              onReplaceImage={onReplaceImage}
               onSave={onSaveEdit}
               onCancel={onClose}
               registerPrimary={registerPrimary}
@@ -923,69 +942,170 @@ function OcrExpandedDebug({ regions }: { regions?: OcrRegionTexts }) {
   )
 }
 
-const ZOOM_MIN = 0.5
+/** 100% = stage width; cannot zoom out below fit (empty edges). */
+const ZOOM_MIN = 1
 const ZOOM_MAX = 4
 const ZOOM_STEP = 0.25
 
-/** Old-style zoom/pan screenshot stage */
-function OcrImagePreview({ imageUrl }: { imageUrl: string }) {
+/** Keep the scaled image covering the viewport — no empty gutters from pan. */
+function clampPanToFill(
+  pan: { x: number; y: number },
+  zoom: number,
+  viewW: number,
+  viewH: number,
+  imgW: number,
+  imgH: number,
+): { x: number; y: number } {
+  if (viewW < 1 || viewH < 1 || imgW < 1 || imgH < 1) return { x: 0, y: 0 }
+  const sw = imgW * zoom
+  const sh = imgH * zoom
+  let x = pan.x
+  let y = pan.y
+  if (sw <= viewW) {
+    x = (viewW - sw) / 2
+  } else {
+    x = Math.min(0, Math.max(viewW - sw, x))
+  }
+  if (sh <= viewH) {
+    y = 0
+  } else {
+    y = Math.min(0, Math.max(viewH - sh, y))
+  }
+  return { x, y }
+}
+
+/** Zoom/pan screenshot stage — same model as OCR region setup. */
+function OcrImagePreview({
+  imageUrl,
+  onDropFiles,
+}: {
+  imageUrl: string
+  onDropFiles?: (files: File[]) => void
+}) {
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
-  const drag = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null)
+  const [dragOver, setDragOver] = useState(false)
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const imgRef = useRef<HTMLImageElement>(null)
+  const zoomRef = useRef(zoom)
+  const drag = useRef<{ x: number; y: number; panX: number; panY: number } | null>(
+    null,
+  )
+  zoomRef.current = zoom
 
-  useEffect(() => {
-    setZoom(1)
-    setPan({ x: 0, y: 0 })
-  }, [imageUrl])
+  function measureAndClampPan(
+    nextPan: { x: number; y: number },
+    nextZoom = zoomRef.current,
+  ): { x: number; y: number } {
+    const view = viewportRef.current
+    const img = imgRef.current
+    if (!view || !img) return nextPan
+    return clampPanToFill(
+      nextPan,
+      nextZoom,
+      view.clientWidth,
+      view.clientHeight,
+      img.offsetWidth,
+      img.offsetHeight,
+    )
+  }
 
   const clampZoom = useCallback(
     (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z)),
     [],
   )
 
-  function zoomBy(delta: number) {
-    setZoom((z) => clampZoom(Math.round((z + delta) / ZOOM_STEP) * ZOOM_STEP))
-  }
+  const zoomBy = useCallback(
+    (delta: number) => {
+      setZoom((z) => {
+        const next = clampZoom(Math.round((z + delta) / ZOOM_STEP) * ZOOM_STEP)
+        setPan((p) => measureAndClampPan(p, next))
+        return next
+      })
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [clampZoom],
+  )
+
+  useEffect(() => {
+    setZoom(1)
+    setPan({ x: 0, y: 0 })
+  }, [imageUrl])
+
+  useEffect(() => {
+    const apply = () => setPan((p) => measureAndClampPan(p, zoom))
+    apply()
+    const img = imgRef.current
+    const onLoad = () => apply()
+    if (img) img.addEventListener('load', onLoad)
+    const view = viewportRef.current
+    let ro: ResizeObserver | undefined
+    if (view && typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(apply)
+      ro.observe(view)
+    }
+    return () => {
+      img?.removeEventListener('load', onLoad)
+      ro?.disconnect()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imageUrl, zoom])
+
+  // Non-passive wheel so page scroll stays locked while zooming over the image.
+  useEffect(() => {
+    const el = viewportRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      zoomBy(e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [imageUrl, zoomBy])
 
   return (
     <div className="ocr-image-preview">
-      <div className="ocr-zoom-bar">
-        <button type="button" className="ghost" onClick={() => zoomBy(-ZOOM_STEP)}>
-          −
-        </button>
-        <span className="ocr-zoom-label">{Math.round(zoom * 100)}%</span>
-        <button type="button" className="ghost" onClick={() => zoomBy(ZOOM_STEP)}>
-          +
-        </button>
-        <button
-          type="button"
-          className="ghost"
-          onClick={() => {
-            setZoom(1)
-            setPan({ x: 0, y: 0 })
-          }}
-        >
-          Reset
-        </button>
-        <span className="hint tight">Scroll to zoom · drag to pan</span>
-      </div>
       <div
-        className="ocr-image-stage"
-        onWheel={(e) => {
+        ref={viewportRef}
+        className={`ocr-image-stage ocr-image-viewport${dragOver ? ' drag-over' : ''}`}
+        title={onDropFiles ? 'Drop an image to update' : undefined}
+        onDragEnter={(e) => {
+          if (!onDropFiles) return
           e.preventDefault()
-          zoomBy(e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP)
+          setDragOver(true)
+        }}
+        onDragOver={(e) => {
+          if (!onDropFiles) return
+          e.preventDefault()
+          e.dataTransfer.dropEffect = 'copy'
+        }}
+        onDragLeave={(e) => {
+          if (!onDropFiles) return
+          if (e.currentTarget.contains(e.relatedTarget as Node)) return
+          setDragOver(false)
+        }}
+        onDrop={(e) => {
+          if (!onDropFiles) return
+          e.preventDefault()
+          setDragOver(false)
+          const files = [...(e.dataTransfer.files ?? [])]
+          if (files.length) onDropFiles(files)
         }}
         onPointerDown={(e) => {
           if (e.button !== 0) return
-          ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+          if ((e.target as HTMLElement).closest('.ocr-zoom-overlay')) return
+          viewportRef.current?.setPointerCapture(e.pointerId)
           drag.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y }
         }}
         onPointerMove={(e) => {
           if (!drag.current) return
-          setPan({
-            x: drag.current.panX + (e.clientX - drag.current.x),
-            y: drag.current.panY + (e.clientY - drag.current.y),
-          })
+          setPan(
+            measureAndClampPan({
+              x: drag.current.panX + (e.clientX - drag.current.x),
+              y: drag.current.panY + (e.clientY - drag.current.y),
+            }),
+          )
         }}
         onPointerUp={() => {
           drag.current = null
@@ -994,14 +1114,41 @@ function OcrImagePreview({ imageUrl }: { imageUrl: string }) {
           drag.current = null
         }}
       >
-        <img
-          src={imageUrl}
-          alt="OCR source"
-          draggable={false}
+        <div
+          className="ocr-image-world"
           style={{
             transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
           }}
-        />
+        >
+          <img
+            ref={imgRef}
+            src={imageUrl}
+            alt="OCR source"
+            draggable={false}
+          />
+        </div>
+        <div
+          className="ocr-zoom-overlay"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="ghost"
+            aria-label="Zoom out"
+            onClick={() => zoomBy(-ZOOM_STEP)}
+          >
+            −
+          </button>
+          <span className="ocr-zoom-label">{Math.round(zoom * 100)}%</span>
+          <button
+            type="button"
+            className="ghost"
+            aria-label="Zoom in"
+            onClick={() => zoomBy(ZOOM_STEP)}
+          >
+            +
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -1012,8 +1159,12 @@ function OcrUploadBlock({
   onToggleRegions,
   ocrBusy,
   progressPct,
+  ocrStatus,
+  batchTotal,
+  batchDone,
   onBrowse,
   onDropFiles,
+  onReplaceImage,
   pasteOpen,
   pasteText,
   onPasteOpen,
@@ -1032,8 +1183,12 @@ function OcrUploadBlock({
   onToggleRegions: () => void
   ocrBusy: boolean
   progressPct: number
+  ocrStatus: string
+  batchTotal: number
+  batchDone: number
   onBrowse: () => void
   onDropFiles: (files: File[]) => void
+  onReplaceImage?: (files: File[]) => void
   pasteOpen: boolean
   pasteText: string
   onPasteOpen: (open: boolean) => void
@@ -1048,43 +1203,89 @@ function OcrUploadBlock({
   onRescan?: () => void
   onAddAll?: () => void
 }) {
+  const canRescan = Boolean(current?.source && onRescan)
+  const scanning = ocrBusy || (batchTotal > 0 && batchDone < batchTotal)
+  const statusLabel = scanning
+    ? `${ocrStatus || 'Scanning…'}${
+        batchTotal > 1
+          ? ` · ${batchDone}/${batchTotal}`
+          : progressPct > 0
+            ? ` · ${progressPct}%`
+            : ''
+      }`
+    : ''
+
   return (
     <div className="ocr-upload-block">
-      <div className="ocr-upload-head">
-        <span className="ocr-upload-title">Contract screenshot</span>
-        <button
-          type="button"
-          className={regionsOpen ? 'ghost ocr-regions-gear open' : 'ghost ocr-regions-gear'}
-          aria-expanded={regionsOpen}
-          aria-haspopup="dialog"
-          aria-label="OCR region setup"
-          title="OCR detection regions"
-          onClick={onToggleRegions}
-        >
-          <svg className="ocr-gear-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden>
-            <path
-              fill="currentColor"
-              d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.2 7.2 0 0 0-1.62-.94l-.36-2.54A.48.48 0 0 0 14 2h-4a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.55-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.65 8.47a.49.49 0 0 0 .12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.77 14.5a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.3.59.22l2.39-.96c.5.39 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h4c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.55 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z"
-            />
-          </svg>
-        </button>
-      </div>
-
       <div
-        className="ocr-drop"
+        className="ocr-drop ocr-upload-bar"
+        title={
+          statusLabel ||
+          'Drop images, Ctrl+V paste, or browse (multi-select)'
+        }
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault()
           onDropFiles([...(e.dataTransfer.files ?? [])])
         }}
       >
-        <p className="hint tight">Drop images, Ctrl+V paste, or browse (multi-select)</p>
-        <div className="ocr-actions">
-          <button type="button" className="primary" disabled={ocrBusy} onClick={onBrowse}>
+        <span className="ocr-upload-title">Contract screenshot</span>
+        <div
+          className={`ocr-upload-progress${scanning ? ' active' : ''}`}
+          title={statusLabel || undefined}
+          aria-hidden={!scanning}
+        >
+          <i style={{ width: scanning ? `${Math.max(progressPct, 6)}%` : '0%' }} />
+        </div>
+        <div className="ocr-upload-head-actions">
+          <button
+            type="button"
+            className="primary"
+            disabled={ocrBusy}
+            onClick={onBrowse}
+          >
             {ocrBusy ? `${progressPct}%` : 'Browse'}
           </button>
-          <button type="button" className="ghost" onClick={() => onPasteOpen(!pasteOpen)}>
-            Paste text
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => onPasteOpen(!pasteOpen)}
+          >
+            Paste
+          </button>
+          {canRescan && (
+            <button
+              type="button"
+              className="ghost"
+              disabled={ocrBusy}
+              onClick={onRescan}
+            >
+              Rescan
+            </button>
+          )}
+          <button
+            type="button"
+            className={
+              regionsOpen ? 'ghost ocr-regions-gear open' : 'ghost ocr-regions-gear'
+            }
+            aria-expanded={regionsOpen}
+            aria-haspopup="dialog"
+            aria-label="OCR region setup"
+            title="OCR detection regions"
+            onClick={onToggleRegions}
+          >
+            <svg
+              className="ocr-gear-icon"
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              aria-hidden
+            >
+              <path
+                fill="currentColor"
+                d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.2 7.2 0 0 0-1.62-.94l-.36-2.54A.48.48 0 0 0 14 2h-4a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.55-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.65 8.47a.49.49 0 0 0 .12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.77 14.5a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.3.59.22l2.39-.96c.5.39 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h4c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.55 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z"
+              />
+            </svg>
           </button>
         </div>
       </div>
@@ -1131,7 +1332,10 @@ function OcrUploadBlock({
           )}
 
           {current?.imageUrl ? (
-            <OcrImagePreview imageUrl={current.imageUrl} />
+            <OcrImagePreview
+              imageUrl={current.imageUrl}
+              onDropFiles={onReplaceImage ?? onDropFiles}
+            />
           ) : (
             <p className="hint tight">
               {ocrBusy ? 'Waiting for the first screenshot…' : 'No image for this scan'}
@@ -1147,18 +1351,13 @@ function OcrUploadBlock({
                 ? 'Scanning…'
                 : 'No mission parsed from this image'}
           </p>
-          <div className="ocr-actions">
-            {current?.source && onRescan && (
-              <button type="button" className="ghost" disabled={ocrBusy} onClick={onRescan}>
-                Rescan
-              </button>
-            )}
-            {multi && onAddAll && readyCount > 1 && (
+          {multi && onAddAll && readyCount > 1 && (
+            <div className="ocr-actions">
               <button type="button" className="ghost" onClick={onAddAll}>
                 Add all ready
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -1174,6 +1373,7 @@ function EditMissionBody({
   scanBusy,
   codeInvalid = false,
   onScanFile,
+  onReplaceImage,
   onSave,
   onCancel,
   registerPrimary,
@@ -1192,6 +1392,7 @@ function EditMissionBody({
   scanBusy: boolean
   codeInvalid?: boolean
   onScanFile: (file: File) => void
+  onReplaceImage?: (files: File[]) => void
   onSave: (mission: Mission) => void
   onCancel: () => void
   registerPrimary?: (api: HeaderPrimary | null) => void
@@ -1215,12 +1416,11 @@ function EditMissionBody({
   const [giver, setGiver] = useState(mission.giver ?? '')
   const [rank, setRank] = useState(mission.rank ?? '')
   const [nameAuto, setNameAuto] = useState(!mission.name.trim())
-  const [totalScu, setTotalScu] = useState(mission.totalScu)
   const [maxUnitScu, setMaxUnitScu] = useState(normalizeCrateSize(mission.maxUnitScu))
   const [rewardAuec, setRewardAuec] = useState(mission.rewardAuec ?? 0)
-  const [commodity, setCommodity] = useState(mission.commodity ?? '')
-  const [pickupIds, setPickupIds] = useState(mission.pickups.map((p) => p.locationId))
-  const [dropoffIds, setDropoffIds] = useState(mission.dropoffs.map((d) => d.locationId))
+  const [objectives, setObjectives] = useState<DraftObjective[]>(() =>
+    cloneObjectives(legacyMissionToObjectives(mission)),
+  )
   const scanRef = useRef<HTMLInputElement>(null)
   const appliedFill = useRef<string | null>(null)
   const lastAutoNameRef = useRef('')
@@ -1235,23 +1435,14 @@ function EditMissionBody({
     nextGiver = giver,
     nextRank = rank,
     nextHaul = haulType,
-    nextPickups = pickupIds,
-    nextDropoffs = dropoffIds,
+    nextObjectives = objectives,
   ): string {
-    const from = nextPickups[0] ? locationLabel(nextPickups[0]) : ''
-    const to = nextDropoffs.length
-      ? locationLabel(nextDropoffs[nextDropoffs.length - 1])
-      : ''
     const demo =
       mission.source === 'demo' || name.trim().startsWith('(DEMO)')
-    return buildAutoMissionName({
+    return autoNameFromObjectives(nextObjectives, {
       giver: nextGiver,
       rank: nextRank,
       haulType: nextHaul,
-      from,
-      to,
-      pickupCount: nextPickups.length,
-      dropoffCount: nextDropoffs.length,
       demo,
     })
   }
@@ -1263,12 +1454,9 @@ function EditMissionBody({
       giver,
       rank,
       haulType,
-      totalScu,
       maxUnitScu,
       rewardAuec,
-      commodity,
-      pickupIds: [...pickupIds],
-      dropoffIds: [...dropoffIds],
+      objectives: cloneObjectives(objectives),
       nameAuto,
       demo: mission.source === 'demo' || name.trim().startsWith('(DEMO)'),
     }
@@ -1281,12 +1469,9 @@ function EditMissionBody({
     setGiver(s.giver)
     setRank(s.rank)
     setHaulType(s.haulType)
-    setTotalScu(s.totalScu)
     setMaxUnitScu(normalizeCrateSize(s.maxUnitScu))
     setRewardAuec(s.rewardAuec)
-    setCommodity(s.commodity)
-    setPickupIds([...s.pickupIds])
-    setDropoffIds([...s.dropoffIds])
+    setObjectives(cloneObjectives(s.objectives))
     setNameAuto(s.nameAuto)
     lastAutoNameRef.current = s.nameAuto ? s.name : ''
     queueMicrotask(() => {
@@ -1312,9 +1497,27 @@ function EditMissionBody({
 
   function noteEdit() {
     if (applyingHistory.current) return
-    if (!debounceBase.current) debounceBase.current = currentSnap()
+    if (!debounceBase.current) {
+      debounceBase.current = currentSnap()
+      setHistTick((t) => t + 1)
+    }
     if (debounceTimer.current) clearTimeout(debounceTimer.current)
     debounceTimer.current = setTimeout(() => flushHistory(), 450)
+  }
+
+  /** Immediate undo step for discrete objective edits. */
+  function commitEdit(apply: () => void) {
+    if (applyingHistory.current) {
+      apply()
+      return
+    }
+    flushHistory()
+    const before = currentSnap()
+    apply()
+    undoStack.current = [...undoStack.current, before].slice(-FORM_UNDO_LIMIT)
+    redoStack.current = []
+    debounceBase.current = null
+    setHistTick((t) => t + 1)
   }
 
   function undo() {
@@ -1378,22 +1581,16 @@ function EditMissionBody({
     giver,
     rank,
     haulType,
-    pickupIds,
-    dropoffIds,
+    objectives,
     registerEditTitle,
   ])
 
   useEffect(() => {
-    const picks = mission.pickups.map((p) => p.locationId)
-    const drops = mission.dropoffs.map((d) => d.locationId)
-    const auto = buildAutoMissionName({
+    const objs = cloneObjectives(legacyMissionToObjectives(mission))
+    const auto = autoNameFromObjectives(objs, {
       giver: mission.giver ?? '',
       rank: mission.rank ?? '',
       haulType: mission.haulType,
-      from: picks[0] ? locationLabel(picks[0]) : '',
-      to: drops.length ? locationLabel(drops[drops.length - 1]) : '',
-      pickupCount: picks.length,
-      dropoffCount: drops.length,
       demo:
         mission.source === 'demo' ||
         mission.name.trim().startsWith('(DEMO)'),
@@ -1407,12 +1604,9 @@ function EditMissionBody({
     setRank(mission.rank ?? '')
     setNameAuto(usingAuto)
     lastAutoNameRef.current = usingAuto ? auto : ''
-    setTotalScu(mission.totalScu)
     setMaxUnitScu(normalizeCrateSize(mission.maxUnitScu))
     setRewardAuec(mission.rewardAuec ?? 0)
-    setCommodity(mission.commodity ?? '')
-    setPickupIds(picks)
-    setDropoffIds(drops)
+    setObjectives(objs)
     appliedFill.current = null
     undoStack.current = []
     redoStack.current = []
@@ -1422,7 +1616,21 @@ function EditMissionBody({
 
   useEffect(() => {
     if (!ocrFill) return
-    const key = `${ocrFill.id}:${ocrFill.name}:${ocrFill.totalScu}:${ocrFill.rewardAuec ?? 0}`
+    const objs = legacyMissionToObjectives(ocrFill)
+    const key = [
+      ocrFill.id,
+      ocrFill.name,
+      ocrFill.totalScu,
+      ocrFill.commodity ?? '',
+      ocrFill.maxUnitScu,
+      ocrFill.rewardAuec ?? 0,
+      objs
+        .map(
+          (o) =>
+            `${o.commodity}:${o.totalScu}:${o.pickups.map((p) => `${p.locationId}=${p.scu}`).join('+')}:${o.dropoffs.map((d) => `${d.locationId}=${d.scu}`).join('+')}`,
+        )
+        .join(';'),
+    ].join('|')
     if (appliedFill.current === key) return
     appliedFill.current = key
     noteEdit()
@@ -1432,12 +1640,9 @@ function EditMissionBody({
     lastAutoNameRef.current = ''
     setGiver(ocrFill.giver ?? '')
     setRank(ocrFill.rank ?? '')
-    setTotalScu(ocrFill.totalScu)
     setMaxUnitScu(normalizeCrateSize(ocrFill.maxUnitScu))
     setRewardAuec(ocrFill.rewardAuec ?? 0)
-    setCommodity(ocrFill.commodity ?? '')
-    setPickupIds(ocrFill.pickups.map((p) => p.locationId))
-    setDropoffIds(ocrFill.dropoffs.map((d) => d.locationId))
+    setObjectives(cloneObjectives(objs))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ocrFill])
 
@@ -1456,7 +1661,7 @@ function EditMissionBody({
     queueMicrotask(() => {
       applyingHistory.current = false
     })
-  }, [nameAuto, giver, rank, haulType, pickupIds, dropoffIds, name])
+  }, [nameAuto, giver, rank, haulType, objectives, name])
 
   return (
     <>
@@ -1488,7 +1693,14 @@ function EditMissionBody({
         <span className="hint tight">Fills the fields below from a contract image</span>
       </div>
 
-      {ocrImageUrl && <OcrImagePreview imageUrl={ocrImageUrl} />}
+      {ocrImageUrl && (
+        <OcrImagePreview
+          imageUrl={ocrImageUrl}
+          onDropFiles={
+            onReplaceImage ?? ((files) => files[0] && onScanFile(files[0]))
+          }
+        />
+      )}
       <OcrExpandedDebug regions={ocrRegions} />
 
       <MissionForm
@@ -1497,12 +1709,9 @@ function EditMissionBody({
         giver={giver}
         rank={rank}
         showGiver
-        totalScu={totalScu}
         maxUnitScu={maxUnitScu}
         rewardAuec={rewardAuec}
-        commodity={commodity}
-        pickupIds={pickupIds}
-        dropoffIds={dropoffIds}
+        objectives={objectives}
         locations={locations}
         commodities={commodities}
         givers={givers}
@@ -1518,10 +1727,6 @@ function EditMissionBody({
           noteEdit()
           setRank(v)
         }}
-        onTotalScu={(v) => {
-          noteEdit()
-          setTotalScu(v)
-        }}
         onMaxUnitScu={(v) => {
           noteEdit()
           setMaxUnitScu(normalizeCrateSize(v))
@@ -1530,56 +1735,44 @@ function EditMissionBody({
           noteEdit()
           setRewardAuec(v)
         }}
-        onCommodity={(v) => {
-          noteEdit()
-          setCommodity(v)
-        }}
-        onPickupIds={(next) => {
-          noteEdit()
-          const r = reconcileHaulStops(next, dropoffIds, 'pickup')
-          setPickupIds(r.pickupIds)
-          setDropoffIds(r.dropoffIds)
-        }}
-        onDropoffIds={(next) => {
-          noteEdit()
-          const r = reconcileHaulStops(pickupIds, next, 'dropoff')
-          setPickupIds(r.pickupIds)
-          setDropoffIds(r.dropoffIds)
+        onObjectives={(next) => {
+          commitEdit(() => setObjectives(cloneObjectives(next)))
         }}
         primaryLabel="Save changes"
         primaryDisabled={scanBusy || codeInvalid}
         onPrimary={() => {
-          if (codeInvalid || !pickupIds.length || !dropoffIds.length) return
-          const from = locationLabel(pickupIds[0])
-          const to = locationLabel(dropoffIds[dropoffIds.length - 1])
+          if (codeInvalid || !objectivesHaveStops(objectives)) return
+          const route = objectiveRouteParts(objectives)
+          const total = objectives.reduce((s, o) => s + o.totalScu, 0)
           onSave(
             createMission({
               id: mission.id,
               code: code.trim().slice(0, 5) || mission.code,
               name:
                 name.trim() ||
-                buildAutoMissionName({
+                autoNameFromObjectives(objectives, {
                   giver,
                   rank,
                   haulType,
-                  from,
-                  to,
-                  pickupCount: pickupIds.length,
-                  dropoffCount: dropoffIds.length,
                   demo:
                     mission.source === 'demo' ||
                     name.trim().startsWith('(DEMO)'),
                 }) ||
-                `Haul ${totalScu} SCU → ${to}`,
+                `Haul ${total} SCU → ${route.to}`,
               haulType,
               rank: rank.trim() || undefined,
               giver: giver.trim() || undefined,
-              pickupIds,
-              dropoffIds,
-              totalScu: Math.max(1, totalScu),
+              pickupIds: route.pickupCount
+                ? objectives.flatMap((o) => o.pickups.map((p) => p.locationId))
+                : [],
+              dropoffIds: route.dropoffCount
+                ? objectives.flatMap((o) => o.dropoffs.map((d) => d.locationId))
+                : [],
+              totalScu: Math.max(1, total),
               maxUnitScu: normalizeCrateSize(maxUnitScu),
               rewardAuec: rewardAuec || undefined,
-              commodity: commodity.trim() || undefined,
+              commodity: objectives[0]?.commodity.trim() || undefined,
+              objectives: cloneObjectives(objectives),
               source: ocrFill ? 'ocr' : mission.source,
               priorPickups: mission.pickups,
             }),
@@ -1598,24 +1791,18 @@ function MissionForm({
   giver,
   rank,
   showGiver,
-  totalScu,
   maxUnitScu,
   rewardAuec,
-  commodity,
-  pickupIds,
-  dropoffIds,
+  objectives,
   locations,
   commodities,
   givers,
   onHaulType,
   onGiver,
   onRank,
-  onTotalScu,
   onMaxUnitScu,
   onRewardAuec,
-  onCommodity,
-  onPickupIds,
-  onDropoffIds,
+  onObjectives,
   primaryLabel,
   primaryDisabled,
   onPrimary,
@@ -1629,24 +1816,18 @@ function MissionForm({
   giver: string
   rank: string
   showGiver: boolean
-  totalScu: number
   maxUnitScu: number
   rewardAuec: number
-  commodity: string
-  pickupIds: string[]
-  dropoffIds: string[]
+  objectives: DraftObjective[]
   locations: Location[]
   commodities: CommodityInfo[]
   givers: string[]
   onHaulType: (v: HaulType) => void
   onGiver: (v: string) => void
   onRank: (v: string) => void
-  onTotalScu: (v: number) => void
   onMaxUnitScu: (v: number) => void
   onRewardAuec: (v: number) => void
-  onCommodity: (v: string) => void
-  onPickupIds: (v: string[]) => void
-  onDropoffIds: (v: string[]) => void
+  onObjectives: (v: DraftObjective[]) => void
   primaryLabel: string
   primaryDisabled?: boolean
   onPrimary: () => void
@@ -1664,7 +1845,7 @@ function MissionForm({
   const onPrimaryRef = useRef(onPrimary)
   onPrimaryRef.current = onPrimary
   const primaryDisabledNow =
-    Boolean(primaryDisabled) || !pickupIds.length || !dropoffIds.length
+    Boolean(primaryDisabled) || !objectivesHaveStops(objectives)
 
   useEffect(() => {
     if (!registerPrimary) return
@@ -1703,15 +1884,6 @@ function MissionForm({
 
       <div className="field-row">
         <label className="field">
-          <span>Total SCU</span>
-          <input
-            type="number"
-            min={1}
-            value={totalScu}
-            onChange={(e) => onTotalScu(Number(e.target.value))}
-          />
-        </label>
-        <label className="field">
           <span>Max crate</span>
           <select
             value={maxUnitScu}
@@ -1738,31 +1910,13 @@ function MissionForm({
         </label>
       </div>
 
-      <CommodityPicker
+      <ObjectivesEditor
         idPrefix={idPrefix}
+        objectives={objectives}
+        maxUnitScu={maxUnitScu}
+        locations={locations}
         commodities={commodities}
-        value={commodity}
-        onChange={onCommodity}
-      />
-
-      <LocationPicker
-        legend="Pickups"
-        idPrefix={`${idPrefix}p`}
-        locations={locations}
-        selectedIds={pickupIds}
-        peerSelectedCount={dropoffIds.length}
-        max={MAX_HAUL_STOPS}
-        onChange={onPickupIds}
-      />
-
-      <LocationPicker
-        legend="Dropoffs"
-        idPrefix={`${idPrefix}d`}
-        locations={locations}
-        selectedIds={dropoffIds}
-        peerSelectedCount={pickupIds.length}
-        max={MAX_HAUL_STOPS}
-        onChange={onDropoffIds}
+        onChange={onObjectives}
       />
 
       {batchNav && (
