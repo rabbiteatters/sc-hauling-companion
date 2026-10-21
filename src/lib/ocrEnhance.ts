@@ -298,39 +298,70 @@ export function parseRewardAmountFromFull(raw: string): number | undefined {
   return page != null && page >= 50_000 ? page : undefined
 }
 
-/** Contract total from “Deliver 0/126 SCU of X to Y” (OCR-tolerant). */
+function normalizeDeliverText(objText: string): string {
+  return objText
+    .replace(/\u00A0/g, ' ')
+    .replace(/[|\\]/g, '/')
+    // Common OCR: O/o for 0 in “0/126”
+    .replace(/\b[oO]\s*\/\s*(\d+)/g, '0/$1')
+}
+
+export type DeliverLine = {
+  totalScu: number
+  commodity: string
+  dropRaw: string
+  index: number
+}
+
+/** All “Deliver 0/N SCU of X to Y” lines (OCR-tolerant), in document order. */
+export function parseAllDeliverLines(objText: string): DeliverLine[] {
+  const text = normalizeDeliverText(objText)
+  const out: DeliverLine[] = []
+  const seen = new Set<number>()
+
+  const tryPattern = (re: RegExp) => {
+    re.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = re.exec(text)) !== null) {
+      if (seen.has(m.index)) continue
+      const totalScu = Number(m[1])
+      if (!(totalScu > 0 && totalScu <= 5000)) continue
+      seen.add(m.index)
+      out.push({
+        totalScu,
+        commodity: m[2].trim(),
+        dropRaw: m[3].replace(/\s+above\b.*/i, '').trim(),
+        index: m.index,
+      })
+    }
+  }
+
+  tryPattern(
+    /del[il1]ver\s+\d+\s*\/\s*(\d+)\s*scu\s+of\s+(.+?)\s+to\s+([^\n.]+)/gi,
+  )
+  tryPattern(/del[il1]ver\s+(\d+)\s*scu\s+of\s+(.+?)\s+to\s+([^\n.]+)/gi)
+  if (!out.length) {
+    // Looser: “0/126 SCU of … to …”
+    tryPattern(/\b\d+\s*\/\s*(\d+)\s*scu\s+of\s+(.+?)\s+to\s+([^\n.]+)/gi)
+  }
+
+  out.sort((a, b) => a.index - b.index)
+  return out
+}
+
+/** First deliver line — contract total / commodity / drop when only one leg. */
 export function parseDeliverTotalScu(objText: string): {
   totalScu: number
   commodity: string
   dropRaw: string
 } | null {
-  const text = objText
-    .replace(/\u00A0/g, ' ')
-    .replace(/[|\\]/g, '/')
-    // Common OCR: O/o for 0 in “0/126”
-    .replace(/\b[oO]\s*\/\s*(\d+)/g, '0/$1')
-
-  const patterns = [
-    /del[il1]ver\s+\d+\s*\/\s*(\d+)\s*scu\s+of\s+(.+?)\s+to\s+([^\n.]+)/i,
-    /del[il1]ver\s+(\d+)\s*scu\s+of\s+(.+?)\s+to\s+([^\n.]+)/i,
-    // Looser: “0/126 SCU of … to …”
-    /\b\d+\s*\/\s*(\d+)\s*scu\s+of\s+(.+?)\s+to\s+([^\n.]+)/i,
-  ]
-
-  for (const re of patterns) {
-    const m = text.match(re)
-    if (!m) continue
-    const totalScu = Number(m[1])
-    if (totalScu > 0 && totalScu <= 5000) {
-      return {
-        totalScu,
-        commodity: m[2].trim(),
-        dropRaw: m[3].replace(/\s+above\s+.*/i, '').trim(),
-      }
-    }
+  const first = parseAllDeliverLines(objText)[0]
+  if (!first) return null
+  return {
+    totalScu: first.totalScu,
+    commodity: first.commodity,
+    dropRaw: first.dropRaw,
   }
-
-  return null
 }
 
 function toCrateSize(n: number): CrateSize | undefined {

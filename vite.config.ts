@@ -3,6 +3,8 @@ import { defineConfig } from 'vite'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Project site: https://<user>.github.io/sc-hauling-companion/
+  base: '/sc-hauling-companion/',
   plugins: [react()],
   server: {
     proxy: {

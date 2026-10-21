@@ -18,7 +18,7 @@ import {
   parseHaulType,
 } from './haulTypes'
 import {
-  parseDeliverTotalScu,
+  parseAllDeliverLines,
   parseGiverName,
   parseRewardAmount,
   parseRewardAmountFromFull,
@@ -26,6 +26,7 @@ import {
   pickMaxCrateSize,
   reconstructHaulTitle,
 } from './ocrEnhance'
+import { createEmptyObjective } from './objectives'
 import {
   clampRegionMap,
   cropBlueScuBlob,
@@ -34,7 +35,7 @@ import {
   OCR_REGION_IDS,
   OCR_REGION_LABELS,
 } from './ocrRegions'
-import { DEFAULT_MAX_UNIT_SCU, createMission } from './spread'
+import { DEFAULT_MAX_UNIT_SCU, buildStops, createMission } from './spread'
 
 export interface OcrProgress {
   status: string
@@ -425,10 +426,11 @@ function extractPickupRaws(objText: string): string[] {
 
 function findPickupsInText(
   objText: string,
-  dropoffId: string,
+  dropoffIds: string[],
   /** 2nd identical collect name → Nyx (objectives crop only). */
   nyxOnDuplicateCollect: boolean,
 ): string[] {
+  const dropSet = new Set(dropoffIds.filter(Boolean))
   const pickupIds: string[] = []
   const seenPlaceKeys = new Set<string>()
   const nyx = getNyxGatewayPyro()
@@ -438,7 +440,7 @@ function findPickupsInText(
     const key = placeKey(raw)
     // In-game quirk: same collect place listed twice → 2nd is Nyx Gateway (Pyro)
     if (nyxOnDuplicateCollect && key && seenPlaceKeys.has(key)) {
-      if (nyx.id !== dropoffId && !pickupIds.includes(nyx.id)) {
+      if (!dropSet.has(nyx.id) && !pickupIds.includes(nyx.id)) {
         pickupIds.push(nyx.id)
       }
       continue
@@ -446,16 +448,16 @@ function findPickupsInText(
     if (key) seenPlaceKeys.add(key)
 
     const loc = resolveContractLocation(raw, ctx)
-    if (loc.id !== dropoffId && !pickupIds.includes(loc.id)) {
+    if (!dropSet.has(loc.id) && !pickupIds.includes(loc.id)) {
       pickupIds.push(loc.id)
     }
   }
 
-  // Last resort: catalog names mentioned in objectives (excluding dropoff) — no Nyx
+  // Last resort: catalog names mentioned in objectives (excluding dropoffs) — no Nyx
   if (!pickupIds.length) {
     const lower = objText.toLowerCase()
     for (const loc of getAllLocations()) {
-      if (loc.id === dropoffId) continue
+      if (dropSet.has(loc.id)) continue
       const names = [loc.shortName, loc.name, ...(loc.aliases ?? [])]
       for (const name of names) {
         if (!name || name.length < 4) continue
@@ -484,31 +486,46 @@ function parseStellarHaul(
   const infoText = regions?.info?.trim() || ''
 
   const objectivesCrop = objectivesCropOnly(regions)
-  const deliver =
-    parseDeliverTotalScu(objectivesCrop) ??
-    parseDeliverTotalScu(objText) ??
-    parseDeliverTotalScu(fullFallback) ??
-    parseDeliverTotalScu(text)
-  if (!deliver) return null
+  let delivers = parseAllDeliverLines(objectivesCrop)
+  if (!delivers.length) delivers = parseAllDeliverLines(objText)
+  if (!delivers.length) delivers = parseAllDeliverLines(fullFallback)
+  if (!delivers.length) delivers = parseAllDeliverLines(text)
+  if (!delivers.length) return null
 
-  const { totalScu, commodity, dropRaw } = deliver
-  const dropoff = resolveContractLocation(
-    dropRaw,
-    createLocationResolveCtx({ nyxOnDuplicate: false }),
-  )
+  const dropCtx = createLocationResolveCtx({ nyxOnDuplicate: false })
+  const dropoffs: { locationId: string; scu: number; shortName: string }[] = []
+  for (const d of delivers) {
+    const loc = resolveContractLocation(d.dropRaw, dropCtx)
+    const existing = dropoffs.find((x) => x.locationId === loc.id)
+    if (existing) {
+      existing.scu += d.totalScu
+    } else {
+      dropoffs.push({
+        locationId: loc.id,
+        scu: d.totalScu,
+        shortName: loc.shortName,
+      })
+    }
+  }
+  if (!dropoffs.length) return null
+
+  const totalScu = dropoffs.reduce((s, d) => s + d.scu, 0)
+  const commodity = delivers[0].commodity
+  const dropoffIds = dropoffs.map((d) => d.locationId)
+  const primaryDrop = dropoffs[0]
 
   // Nyx quirk: 2nd identical *collect* name in OBJECTIVES → Nyx Gateway (Pyro).
   // Skip when objectives alternate Deliver/Collect/Deliver/Collect (multi-leg).
   const pickupIds: string[] = []
   if (objectivesCrop) {
     const nyxOnDup = !isAlternatingDeliverCollectOrder(objectivesCrop)
-    pickupIds.push(...findPickupsInText(objectivesCrop, dropoff.id, nyxOnDup))
+    pickupIds.push(...findPickupsInText(objectivesCrop, dropoffIds, nyxOnDup))
   }
   if (!pickupIds.length) {
     const fallbackText =
       objectivesCrop && objectivesCrop !== fullFallback ? fullFallback : objText
     if (fallbackText && fallbackText !== objectivesCrop) {
-      pickupIds.push(...findPickupsInText(fallbackText, dropoff.id, false))
+      pickupIds.push(...findPickupsInText(fallbackText, dropoffIds, false))
     }
   }
   if (!pickupIds.length) return null
@@ -529,19 +546,25 @@ function parseStellarHaul(
 
   const rawTitle =
     reconstructHaulTitle(titleText) || reconstructHaulTitle(fullFallback)
+  const destLabel = dropoffs.length > 1 ? 'MULTI' : primaryDrop.shortName
   const name =
-    alignTitleDestination(rawTitle, dropoff.shortName) ||
-    `Stellar Haul | ${totalScu} SCU ${commodity} → ${dropoff.shortName}`
+    alignTitleDestination(rawTitle, destLabel) ||
+    `Stellar Haul | ${totalScu} SCU ${commodity} → ${destLabel}`
 
   const haulType: HaulType =
     parseHaulType(titleText || name) ??
     parseHaulType(name) ??
-    inferHaulType(pickupIds.length, 1, name) ??
+    inferHaulType(pickupIds.length, dropoffs.length, name) ??
     DEFAULT_HAUL_TYPE
 
   const giver =
     parseGiverName(giverText, { regionCrop: true }) ??
     parseGiverName(fullFallback, { regionCrop: false })
+
+  const pickups =
+    pickupIds.length === 1
+      ? [{ locationId: pickupIds[0], scu: totalScu, confirmed: false }]
+      : buildStops(pickupIds, totalScu, maxUnitScu)
 
   return createMission({
     name,
@@ -553,8 +576,19 @@ function parseStellarHaul(
     maxUnitScu,
     rewardAuec: reward,
     pickupIds,
-    dropoffIds: [dropoff.id],
+    dropoffIds,
     source: 'ocr',
+    objectives: [
+      createEmptyObjective({
+        commodity,
+        totalScu,
+        pickups,
+        dropoffs: dropoffs.map((d) => ({
+          locationId: d.locationId,
+          scu: d.scu,
+        })),
+      }),
+    ],
   })
 }
 

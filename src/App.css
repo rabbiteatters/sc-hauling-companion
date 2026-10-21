@@ -2841,7 +2841,7 @@ button.danger {
   }
 }
 
-/* —— Mission objectives (expandable groups) —— */
+/* -- Mission objectives (expandable groups) -- */
 .objectives-section {
   margin: 0.75rem 0 0.35rem;
   display: flex;
