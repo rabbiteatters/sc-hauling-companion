@@ -1,0 +1,47 @@
+@import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@500;600;700&family=Source+Sans+3:wght@400;600&display=swap');
+
+:root {
+  --font-display: 'Exo 2', sans-serif;
+  --font-body: 'Source Sans 3', sans-serif;
+  --ink: #d7e2ea;
+  --fog: #e8eef3;
+  --muted: #8fa5b5;
+  --steel: #9bb4c6;
+  --amber: #d48c30;
+  --mint: #4ecf7e;
+  color-scheme: dark;
+  font-family: var(--font-body);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  min-width: 320px;
+  background: #152028;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+a {
+  color: var(--amber);
+}

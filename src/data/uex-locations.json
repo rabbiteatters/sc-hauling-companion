@@ -1,0 +1,301 @@
+[
+  {
+    "id": "arc-l1",
+    "name": "ARC-L1 Wide Forest Station",
+    "shortName": "ARC-L1",
+    "body": "Stanton",
+    "type": "rest",
+    "x": 16.72922003495752,
+    "y": -19.942048185734926,
+    "z": 0.0022397652149551304,
+    "system": "stanton",
+    "aliases": [
+      "ARC-L1",
+      "ARC-L1 Wide Forest Station"
+    ]
+  },
+  {
+    "id": "crc-l1",
+    "name": "CRU-L1 Ambitious Dream Station",
+    "shortName": "CRU-L1",
+    "body": "Stanton",
+    "type": "rest",
+    "x": -17.06875372135561,
+    "y": -2.3994822729430734,
+    "z": -0.00002004422462076392,
+    "system": "stanton",
+    "aliases": [
+      "CRU-L1",
+      "CRU-L1 Ambitious Dream Station"
+    ]
+  },
+  {
+    "id": "hrc-l1",
+    "name": "HUR-L1 Green Glade Station",
+    "shortName": "HUR-L1",
+    "body": "Stanton",
+    "type": "rest",
+    "x": 11.561412555753657,
+    "y": -0.00026292320307,
+    "z": -0.00048461427223299994,
+    "system": "stanton",
+    "aliases": [
+      "HUR-L1",
+      "HUR-L1 Green Glade Station"
+    ]
+  },
+  {
+    "id": "hrc-l2",
+    "name": "HUR-L2 Faithful Dream Station",
+    "shortName": "HUR-L2",
+    "body": "Stanton",
+    "type": "rest",
+    "x": 14.139635583044806,
+    "y": -0.001967277639212439,
+    "z": -0.000527794260616351,
+    "system": "stanton",
+    "aliases": [
+      "HUR-L2",
+      "HUR-L2 Faithful Dream Station"
+    ]
+  },
+  {
+    "id": "mic-l1",
+    "name": "MIC-L1 Shallow Frontier Station",
+    "shortName": "MIC-L1",
+    "body": "Stanton",
+    "type": "rest",
+    "x": 20.21582726888809,
+    "y": 33.46706951783793,
+    "z": -9.432008828393882e-7,
+    "system": "stanton",
+    "aliases": [
+      "MIC-L1",
+      "MIC-L1 Shallow Frontier Station"
+    ]
+  },
+  {
+    "id": "everus-harbor",
+    "name": "Everus Harbor",
+    "shortName": "Everus",
+    "body": "Hurston",
+    "type": "station",
+    "x": 12.8499493506875,
+    "y": -0.0009034644375,
+    "z": 0.0004964890625,
+    "system": "stanton",
+    "aliases": [
+      "Everus Harbor",
+      "Everus Harbor"
+    ]
+  },
+  {
+    "id": "baijini-point",
+    "name": "Baijini Point",
+    "shortName": "Baijini",
+    "body": "ArcCorp",
+    "type": "station",
+    "x": 18.58689277929352,
+    "y": -22.15223826753135,
+    "z": -0.00035950934375,
+    "system": "stanton",
+    "aliases": [
+      "Baijini Point",
+      "Baijini Point"
+    ]
+  },
+  {
+    "id": "port-tressler",
+    "name": "Port Tressler",
+    "shortName": "Tressler",
+    "body": "microTech",
+    "type": "station",
+    "x": 22.462646723530945,
+    "y": 37.18629081784713,
+    "z": 0.0008088317625309999,
+    "system": "stanton",
+    "aliases": [
+      "Port Tressler",
+      "Port Tressler"
+    ]
+  },
+  {
+    "id": "seraphim",
+    "name": "Seraphim Station",
+    "shortName": "Seraphim",
+    "body": "Crusader",
+    "type": "station",
+    "x": -18.956299901798214,
+    "y": -2.6663442067232705,
+    "z": 0.0055658832319069994,
+    "system": "stanton",
+    "aliases": [
+      "Seraphim",
+      "Seraphim Station"
+    ]
+  },
+  {
+    "id": "grim-hex",
+    "name": "GrimHEX",
+    "shortName": "Grim HEX",
+    "body": "Crusader",
+    "type": "station",
+    "x": -19.023485457614875,
+    "y": -2.6136125867484723,
+    "z": -0.000002042,
+    "system": "stanton",
+    "aliases": [
+      "KC Trending GrimHEX",
+      "GrimHEX"
+    ]
+  },
+  {
+    "id": "orison",
+    "name": "Orison",
+    "shortName": "Orison",
+    "body": "Crusader",
+    "type": "city",
+    "x": -18.956880483059194,
+    "y": -2.6658231935330234,
+    "z": 0.005282237225567,
+    "system": "stanton",
+    "aliases": [
+      "Orison"
+    ]
+  },
+  {
+    "id": "ruin-station",
+    "name": "Ruin Station",
+    "shortName": "Ruin",
+    "body": "Pyro VI",
+    "type": "station",
+    "x": -52.33683486899303,
+    "y": -43.91792543195215,
+    "z": -0.000100477857041,
+    "system": "pyro",
+    "aliases": [
+      "Ruin Station",
+      "Ruin Station"
+    ]
+  },
+  {
+    "id": "gaslight",
+    "name": "Gaslight",
+    "shortName": "Gaslight",
+    "body": "Pyro V",
+    "type": "station",
+    "x": 46.49444894491938,
+    "y": -8.190926212562625,
+    "z": 0.017665446105198,
+    "system": "pyro",
+    "aliases": [
+      "Gaslight",
+      "Gaslight"
+    ]
+  },
+  {
+    "id": "starlight",
+    "name": "Starlight Service Station",
+    "shortName": "Starlight",
+    "body": "Pyro III",
+    "type": "station",
+    "x": -7.756636101209558,
+    "y": -14.008864142502597,
+    "z": 0.0013577010609309998,
+    "system": "pyro",
+    "aliases": [
+      "Starlight Service",
+      "Starlight Service Station"
+    ]
+  },
+  {
+    "id": "rats-nest",
+    "name": "Rat's Nest",
+    "shortName": "Rat's Nest",
+    "body": "Pyro V",
+    "type": "station",
+    "x": 3.732645628287643,
+    "y": -42.76691361756991,
+    "z": 0.018513515236621998,
+    "system": "pyro",
+    "aliases": [
+      "Rat's Nest",
+      "Rat's Nest"
+    ]
+  },
+  {
+    "id": "megumi",
+    "name": "Megumi Refueling",
+    "shortName": "Megumi",
+    "body": "Pyro VI",
+    "type": "station",
+    "x": -59.14557065422604,
+    "y": 34.14552270731846,
+    "z": 0.012705743427003,
+    "system": "pyro",
+    "aliases": [
+      "Megumi",
+      "Megumi Refueling"
+    ]
+  },
+  {
+    "id": "dudley",
+    "name": "Dudley & Daughters",
+    "shortName": "Dudley",
+    "body": "Pyro VI",
+    "type": "station",
+    "x": 23.342575877755305,
+    "y": -64.2259602800299,
+    "z": -0.010765064143322,
+    "system": "pyro",
+    "aliases": [
+      "Dudley & Daughters",
+      "Dudley & Daughters"
+    ]
+  },
+  {
+    "id": "patch-city",
+    "name": "Patch City",
+    "shortName": "Patch City",
+    "body": "Pyro III",
+    "type": "station",
+    "x": 11.445282814891652,
+    "y": 13.62234125920288,
+    "z": 0.0027525542240229997,
+    "system": "pyro",
+    "aliases": [
+      "Patch City",
+      "Patch City"
+    ]
+  },
+  {
+    "id": "endgame",
+    "name": "Endgame",
+    "shortName": "Endgame",
+    "body": "Pyro VI",
+    "type": "station",
+    "x": 48.29675463574633,
+    "y": 48.29197919572477,
+    "z": 0.002735552171102,
+    "system": "pyro",
+    "aliases": [
+      "Endgame",
+      "Endgame"
+    ]
+  },
+  {
+    "id": "rods-fuel",
+    "name": "Rod's Fuel 'N Supplies",
+    "shortName": "Rod's Fuel",
+    "body": "Pyro V",
+    "type": "station",
+    "x": 14.664316072490164,
+    "y": 40.33862460351494,
+    "z": -0.00951876919755,
+    "system": "pyro",
+    "aliases": [
+      "Rod's Fuel",
+      "Rod's Fuel 'N Supplies"
+    ]
+  }
+]
