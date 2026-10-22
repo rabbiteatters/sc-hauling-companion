@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { flushSync } from 'react-dom'
 import {
   MissionModal,
@@ -33,16 +40,17 @@ import {
   objectivesHaveErrors,
 } from './lib/objectives'
 import { parseMissionText, readMissionImage } from './lib/ocr'
-import { formatAuec, formatHoldCapacity, optimizeRoute } from './lib/optimizer'
+import { formatHoldCapacity, optimizeRoute } from './lib/optimizer'
 import {
   DEFAULT_MAX_UNIT_SCU,
   amendPickupActual,
   clampMissionCode,
   createMission,
-  formatStopSummary,
+  isMissionEnabled,
   nextDemoMissionCode,
   nextMissionCode,
   normalizeCrateSize,
+  sortMissionsByCode,
 } from './lib/spread'
 import {
   getAllLocations,
@@ -53,6 +61,365 @@ import type { HaulType, Mission, OptimizedRoute } from './types'
 import './App.css'
 
 const cached = loadAppCache()
+
+function haulTypeLabel(t: HaulType): string {
+  return t
+}
+
+/** Horizontal marquee when the mission name overflows its row. */
+function AutoScrollName({ text }: { text: string }) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const textRef = useRef<HTMLSpanElement>(null)
+  const [overflow, setOverflow] = useState(false)
+
+  useEffect(() => {
+    const wrap = wrapRef.current
+    const el = textRef.current
+    if (!wrap || !el) return
+    const check = () => {
+      const dist = Math.max(0, el.scrollWidth - wrap.clientWidth)
+      setOverflow(dist > 1)
+      wrap.style.setProperty('--scroll-dist', `${dist}px`)
+    }
+    check()
+    const ro = new ResizeObserver(check)
+    ro.observe(wrap)
+    return () => ro.disconnect()
+  }, [text])
+
+  return (
+    <div
+      ref={wrapRef}
+      className={`mission-name-scroll${overflow ? ' is-overflow' : ''}`}
+      title={text}
+    >
+      <span ref={textRef} className="mission-name">
+        {text}
+      </span>
+    </div>
+  )
+}
+
+function outerWidth(el: HTMLElement): number {
+  const r = el.getBoundingClientRect()
+  const cs = getComputedStyle(el)
+  return (
+    r.width +
+    (parseFloat(cs.marginLeft) || 0) +
+    (parseFloat(cs.marginRight) || 0)
+  )
+}
+
+type StopPack = { sepBefore: boolean[]; breakBefore: boolean[] }
+
+function sameStopPack(a: StopPack, b: StopPack): boolean {
+  return (
+    a.sepBefore.length === b.sepBefore.length &&
+    a.sepBefore.every((v, i) => v === b.sepBefore[i]) &&
+    a.breakBefore.every((v, i) => v === b.breakBefore[i])
+  )
+}
+
+/**
+ * In/Out locations: pack names + ·. New lines use a 100% flex spacer (not on
+ * the name itself) so later names can still share that line with a ·.
+ */
+function StopLocationList({
+  stops,
+  getName,
+}: {
+  stops: { locationId: string; confirmed?: boolean }[]
+  getName: (id: string) => string
+}) {
+  const wrapRef = useRef<HTMLSpanElement>(null)
+  const measureRef = useRef<HTMLSpanElement>(null)
+  const [packState, setPackState] = useState<StopPack>(() => ({
+    sepBefore: stops.map((_, i) => i > 0),
+    breakBefore: stops.map(() => false),
+  }))
+
+  const labels = useMemo(
+    () =>
+      stops.map(
+        (s) => `${getName(s.locationId)}${s.confirmed ? '✓' : ''}`,
+      ),
+    [stops, getName],
+  )
+
+  useLayoutEffect(() => {
+    const wrap = wrapRef.current
+    const measure = measureRef.current
+    if (!wrap || !measure) return
+
+    const packFromMeasure = (): StopPack => {
+      const avail = wrap.clientWidth
+      const nameEls = [
+        ...measure.querySelectorAll<HTMLElement>(':scope > .stop-loc-measure'),
+      ]
+      const sepEl = measure.querySelector<HTMLElement>(
+        ':scope > .stops-sep-measure',
+      )
+      const sepW = sepEl ? outerWidth(sepEl) : 12
+      const sepBefore = labels.map((_, i) => i > 0)
+      const breakBefore = labels.map(() => false)
+      let used = 0
+      for (let i = 0; i < nameEls.length; i++) {
+        const el = nameEls[i]
+        if (!el) continue
+        const w = Math.min(outerWidth(el), avail)
+        if (i === 0) {
+          used = w
+          sepBefore[0] = false
+          breakBefore[0] = false
+          continue
+        }
+        if (used + sepW + w <= avail + 0.5) {
+          sepBefore[i] = true
+          breakBefore[i] = false
+          used += sepW + w
+        } else {
+          // New line, no leading ·. Spacer keeps it from jumping back up.
+          sepBefore[i] = false
+          breakBefore[i] = true
+          used = w
+        }
+      }
+      return { sepBefore, breakBefore }
+    }
+
+    const run = () => {
+      if (wrap.clientWidth <= 0) return
+      const next = packFromMeasure()
+      setPackState((prev) => (sameStopPack(prev, next) ? prev : next))
+    }
+
+    run()
+    const ro = new ResizeObserver(run)
+    ro.observe(wrap)
+    return () => ro.disconnect()
+  }, [labels])
+
+  // Strip any · that still landed at the start of a wrapped line (once per pack).
+  useLayoutEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+    const chunks = [
+      ...wrap.querySelectorAll<HTMLElement>(':scope > .stop-chunk'),
+    ]
+    if (chunks.length < 2) return
+
+    setPackState((prev) => {
+      const sepBefore = [...prev.sepBefore]
+      const breakBefore = [...prev.breakBefore]
+      let changed = false
+      for (let i = 1; i < chunks.length; i++) {
+        const el = chunks[i]
+        const prevChunk = chunks[i - 1]
+        if (!el || !prevChunk) continue
+        if (el.offsetTop > prevChunk.offsetTop + 1 && sepBefore[i]) {
+          sepBefore[i] = false
+          breakBefore[i] = true
+          changed = true
+        }
+      }
+      if (!changed) return prev
+      const next = { sepBefore, breakBefore }
+      return sameStopPack(prev, next) ? prev : next
+    })
+  }, [labels, packState.sepBefore, packState.breakBefore])
+
+  return (
+    <span ref={wrapRef} className="stops-text">
+      <span ref={measureRef} className="stops-text-measure" aria-hidden>
+        <span className="stops-sep stops-sep-measure">·</span>
+        {labels.map((label, i) => (
+          <span key={`m-${i}`} className="stop-loc stop-loc-measure">
+            {label}
+          </span>
+        ))}
+      </span>
+      {stops.map((s, i) => (
+        <span key={`${s.locationId}-${i}`} className="stop-unit">
+          {packState.breakBefore[i] ? (
+            <span className="stop-line-break" aria-hidden />
+          ) : null}
+          <span className="stop-chunk">
+            {packState.sepBefore[i] ? (
+              <span className="stops-sep" aria-hidden>
+                ·
+              </span>
+            ) : null}
+            <span className="stop-loc">{labels[i]}</span>
+          </span>
+        </span>
+      ))}
+    </span>
+  )
+}
+
+type MissionTagKey = 'scu' | 'commodity' | 'giver' | 'rank' | 'type'
+
+const TAG_FIT_PRIORITY: MissionTagKey[] = [
+  'scu',
+  'commodity',
+  'giver',
+  'rank',
+  'type',
+]
+const TAG_DISPLAY_ORDER: MissionTagKey[] = [
+  'giver',
+  'rank',
+  'type',
+  'commodity',
+  'scu',
+]
+
+type MissionTagCandidate = { key: MissionTagKey; label: string }
+
+type MissionTagLayout = {
+  avail: number
+  widths: Partial<Record<MissionTagKey, number>>
+}
+
+function buildMissionTagCandidates(
+  mission: Mission,
+  typeLabel: (t: HaulType) => string,
+): MissionTagCandidate[] {
+  const commodity =
+    missionCommodityLabel(legacyMissionToObjectives(mission)) ||
+    mission.commodity?.trim() ||
+    ''
+  const list: MissionTagCandidate[] = [
+    { key: 'scu', label: `${mission.totalScu} SCU` },
+  ]
+  if (commodity) list.push({ key: 'commodity', label: commodity })
+  if (mission.giver?.trim()) {
+    list.push({ key: 'giver', label: mission.giver.trim() })
+  }
+  if (mission.rank && String(mission.rank).trim()) {
+    list.push({ key: 'rank', label: String(mission.rank).trim() })
+  }
+  if (mission.haulType) {
+    list.push({ key: 'type', label: typeLabel(mission.haulType) })
+  }
+  return list
+}
+
+/** Shared tag set: tags that fit in every row (narrowest width, widest labels). */
+function computeSharedMissionTagKeys(
+  layouts: MissionTagLayout[],
+): MissionTagKey[] {
+  if (!layouts.length) return ['scu']
+  const minAvail = Math.min(...layouts.map((l) => l.avail))
+  const gap = 4
+  const shown: MissionTagKey[] = []
+  let used = 0
+  for (const key of TAG_FIT_PRIORITY) {
+    const widths = layouts
+      .map((l) => l.widths[key])
+      .filter((w): w is number => typeof w === 'number' && w > 0)
+    if (!widths.length) continue
+    const w = Math.max(...widths)
+    const next = shown.length === 0 ? w : used + gap + w
+    if (next <= minAvail + 0.5 || shown.length === 0) {
+      shown.push(key)
+      used = next
+    } else {
+      break
+    }
+  }
+  return shown
+}
+
+/** True when any mission has a tag that shared fit dropped. */
+function missionTagsAreHiding(
+  layouts: MissionTagLayout[],
+  sharedKeys: MissionTagKey[],
+): boolean {
+  const shared = new Set(sharedKeys)
+  for (const layout of layouts) {
+    for (const key of TAG_FIT_PRIORITY) {
+      const w = layout.widths[key]
+      if (typeof w === 'number' && w > 0 && !shared.has(key)) return true
+    }
+  }
+  return false
+}
+
+function sameTagKeys(a: MissionTagKey[], b: MissionTagKey[]): boolean {
+  return a.length === b.length && a.every((k, i) => k === b[i])
+}
+
+/** Fit priority: SCU → commodity → giver → rank → type (shared across list). */
+function MissionPriorityTags({
+  mission,
+  typeLabel,
+  sharedKeys,
+  onLayout,
+}: {
+  mission: Mission
+  typeLabel: (t: HaulType) => string
+  sharedKeys: MissionTagKey[]
+  onLayout: (missionId: string, layout: MissionTagLayout | null) => void
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const measureRef = useRef<HTMLDivElement>(null)
+  const candidates = useMemo(
+    () => buildMissionTagCandidates(mission, typeLabel),
+    [mission, typeLabel],
+  )
+
+  useLayoutEffect(() => {
+    const wrap = wrapRef.current
+    const measure = measureRef.current
+    if (!wrap || !measure) return
+
+    const report = () => {
+      const widths: Partial<Record<MissionTagKey, number>> = {}
+      for (const c of candidates) {
+        const el = measure.querySelector<HTMLElement>(`[data-tag="${c.key}"]`)
+        if (el) widths[c.key] = el.offsetWidth
+      }
+      onLayout(mission.id, { avail: wrap.clientWidth, widths })
+    }
+
+    report()
+    const ro = new ResizeObserver(report)
+    ro.observe(wrap)
+    return () => {
+      ro.disconnect()
+      onLayout(mission.id, null)
+    }
+  }, [candidates, mission.id, onLayout])
+
+  const byKey = new Map(candidates.map((c) => [c.key, c]))
+  const visible = TAG_DISPLAY_ORDER
+    .filter((k) => sharedKeys.includes(k))
+    .map((k) => byKey.get(k))
+    .filter((c): c is MissionTagCandidate => c != null)
+
+  return (
+    <div ref={wrapRef} className="mission-tags">
+      <div ref={measureRef} className="mission-tags-measure" aria-hidden>
+        {candidates.map((c) => (
+          <span key={c.key} className="tag" data-tag={c.key}>
+            {c.label}
+          </span>
+        ))}
+      </div>
+      <div className="mission-meta-track">
+        {visible.map((c) => (
+          <span
+            key={c.key}
+            className={`tag${c.key === 'scu' ? ' mission-scu-tag' : ''}`}
+          >
+            {c.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 export default function App() {
   const catalog = useCatalog()
@@ -71,6 +438,16 @@ export default function App() {
   const [route, setRoute] = useState<OptimizedRoute | null>(null)
   const [configCollapsed, setConfigCollapsed] = useState(false)
   const [missionsCollapsed, setMissionsCollapsed] = useState(false)
+  const [missionsRearrangeMode, setMissionsRearrangeMode] = useState(false)
+  const [sharedMissionTagKeys, setSharedMissionTagKeys] = useState<
+    MissionTagKey[]
+  >(['scu'])
+  const missionTagLayoutsRef = useRef(new Map<string, MissionTagLayout>())
+  /** Edit/Remove icon+label when wide enough and no tags are being dropped. */
+  const [missionActionText, setMissionActionText] = useState(false)
+  const missionTagsHidingRef = useRef(false)
+  const missionListRef = useRef<HTMLUListElement>(null)
+  const missionActionProbeRef = useRef<HTMLDivElement>(null)
   const [purgeConfirmOpen, setPurgeConfirmOpen] = useState(false)
   const [ocrBusy, setOcrBusy] = useState(false)
   const [ocrProgress, setOcrProgress] = useState(0)
@@ -102,6 +479,116 @@ export default function App() {
     return catalog.ships.find((s) => s.id === shipId)?.cargoScu ?? 0
   }, [capacityMode, customScu, shipId, catalog.ships])
 
+  const activeMissions = useMemo(
+    () => missions.filter(isMissionEnabled),
+    [missions],
+  )
+  const activeScu = useMemo(
+    () => activeMissions.reduce((s, m) => s + m.totalScu, 0),
+    [activeMissions],
+  )
+
+  useEffect(() => {
+    if (missions.length < 2 && missionsRearrangeMode) {
+      setMissionsRearrangeMode(false)
+    }
+  }, [missions.length, missionsRearrangeMode])
+
+  const labeledActionsWidth = useCallback(() => {
+    const probe = missionActionProbeRef.current
+    if (!probe) return 72
+    const w = Math.ceil(probe.getBoundingClientRect().width)
+    return w > 0 ? w : 72
+  }, [])
+
+  /**
+   * Space priority when narrowing:
+   * 1) Keep all tags + icon+text actions if they fit
+   * 2) Else drop action text (icons only), keep all tags if they fit
+   * 3) Else icons only + hide tags by priority
+   */
+  const recomputeMissionListChrome = useCallback(() => {
+    const ids = new Set(missions.map((m) => m.id))
+    for (const id of [...missionTagLayoutsRef.current.keys()]) {
+      if (!ids.has(id)) missionTagLayoutsRef.current.delete(id)
+    }
+    const raw = missions
+      .map((m) => missionTagLayoutsRef.current.get(m.id))
+      .filter((l): l is MissionTagLayout => l != null)
+    if (raw.length < missions.length) return
+
+    const list = missionListRef.current
+    const listW = list?.clientWidth ?? 0
+    if (listW <= 0) return
+
+    const chrome = 48
+    const labeledW = labeledActionsWidth()
+    const iconActionsW = 32
+
+    const layoutsFor = (actionsW: number): MissionTagLayout[] => {
+      const avail = Math.max(0, listW - chrome - actionsW - 8)
+      return raw.map((l) => ({ ...l, avail }))
+    }
+
+    const withLabels = layoutsFor(labeledW)
+    const keysWithLabels = computeSharedMissionTagKeys(withLabels)
+    if (!missionTagsAreHiding(withLabels, keysWithLabels)) {
+      missionTagsHidingRef.current = false
+      setSharedMissionTagKeys((prev) =>
+        sameTagKeys(prev, keysWithLabels) ? prev : keysWithLabels,
+      )
+      setMissionActionText((prev) => (prev ? prev : true))
+      return
+    }
+
+    // Not enough for labels — icons only, then hide tags only if still needed
+    const withIcons = layoutsFor(iconActionsW)
+    const keysWithIcons = computeSharedMissionTagKeys(withIcons)
+    const hiding = missionTagsAreHiding(withIcons, keysWithIcons)
+    missionTagsHidingRef.current = hiding
+    setSharedMissionTagKeys((prev) =>
+      sameTagKeys(prev, keysWithIcons) ? prev : keysWithIcons,
+    )
+    setMissionActionText((prev) => (prev ? false : prev))
+  }, [missions, labeledActionsWidth])
+
+  const onMissionTagLayout = useCallback(
+    (missionId: string, layout: MissionTagLayout | null) => {
+      if (layout) {
+        const prev = missionTagLayoutsRef.current.get(missionId)
+        // Ignore ephemeral avail from the row; chrome recompute supplies stable avail.
+        if (
+          prev &&
+          TAG_FIT_PRIORITY.every((k) => prev.widths[k] === layout.widths[k])
+        ) {
+          return
+        }
+        missionTagLayoutsRef.current.set(missionId, layout)
+      } else {
+        missionTagLayoutsRef.current.delete(missionId)
+      }
+      recomputeMissionListChrome()
+    },
+    [recomputeMissionListChrome],
+  )
+
+  useLayoutEffect(() => {
+    if (missionsCollapsed) {
+      setMissionActionText(false)
+      return
+    }
+    const list = missionListRef.current
+    const probe = missionActionProbeRef.current
+    if (!list || !probe) return
+
+    const ro = new ResizeObserver(() => {
+      recomputeMissionListChrome()
+    })
+    ro.observe(list)
+    ro.observe(probe)
+    recomputeMissionListChrome()
+    return () => ro.disconnect()
+  }, [missions.length, missionsCollapsed, recomputeMissionListChrome])
 
   // Persist all selectable choices
   useEffect(() => {
@@ -463,7 +950,44 @@ export default function App() {
       m.id === missionId ? amendPickupActual(m, locationId, actualScu) : m,
     )
     setMissions(next)
-    if (startId) setRoute(optimizeRoute(next, startId, capacityScu))
+    if (startId) {
+      setRoute(
+        optimizeRoute(next.filter(isMissionEnabled), startId, capacityScu),
+      )
+    }
+  }
+
+  function toggleMissionEnabled(id: string) {
+    pushMissionUndo(missions)
+    setMissions((list) =>
+      list.map((m) =>
+        m.id === id ? { ...m, enabled: !isMissionEnabled(m) } : m,
+      ),
+    )
+    setMissionsInitialized(true)
+    setRoute(null)
+  }
+
+  function moveMission(id: string, delta: -1 | 1) {
+    const index = missions.findIndex((m) => m.id === id)
+    if (index < 0) return
+    const nextIndex = index + delta
+    if (nextIndex < 0 || nextIndex >= missions.length) return
+    pushMissionUndo(missions)
+    const next = [...missions]
+    const [item] = next.splice(index, 1)
+    next.splice(nextIndex, 0, item)
+    setMissions(next)
+    setMissionsInitialized(true)
+  }
+
+  function sortMissionsByCodeAction() {
+    if (missions.length < 2) return
+    const sorted = sortMissionsByCode(missions)
+    if (sorted.every((m, i) => m.id === missions[i]?.id)) return
+    pushMissionUndo(missions)
+    setMissions(sorted)
+    setMissionsInitialized(true)
   }
 
   function removeMission(id: string) {
@@ -507,7 +1031,16 @@ export default function App() {
   }
 
   function saveMission(updated: Mission) {
-    setMissions((list) => list.map((m) => (m.id === updated.id ? updated : m)))
+    setMissions((list) =>
+      list.map((m) =>
+        m.id === updated.id
+          ? {
+              ...updated,
+              ...(m.enabled === false ? { enabled: false as const } : {}),
+            }
+          : m,
+      ),
+    )
     setMissionsInitialized(true)
     setEditingMissionId(null)
     setModalStep(null)
@@ -520,7 +1053,7 @@ export default function App() {
 
   function runOptimize() {
     if (!startId) return
-    setRoute(optimizeRoute(missions, startId, capacityScu))
+    setRoute(optimizeRoute(activeMissions, startId, capacityScu))
     setConfigCollapsed(true)
     setMissionsCollapsed(true)
   }
@@ -896,7 +1429,7 @@ export default function App() {
       ? (ocrPending.items[ocrPending.index].missions[0] ?? null)
       : null
 
-  const typeLabel = (t: HaulType) => t
+  const typeLabel = haulTypeLabel
 
   if (catalog.loading && !catalog.loadedAt) {
     return (
@@ -936,14 +1469,14 @@ export default function App() {
           <button type="button" className="ghost" onClick={() => void catalog.reload()}>
             Refresh data
           </button>
-          <button
-            type="button"
+        <button
+          type="button"
             className="primary calc-btn"
             onClick={runOptimize}
-            disabled={!missions.length || !startId}
-          >
+            disabled={!activeMissions.length || !startId}
+        >
             Calculate optimal route
-          </button>
+        </button>
         </div>
       </header>
 
@@ -1062,7 +1595,7 @@ export default function App() {
               }}
             >
               <h2 className="collapse-title">
-                {`Missions · ${missions.length} · ${missions.reduce((s, m) => s + m.totalScu, 0)} SCU`}
+                {`Missions · ${activeMissions.length}/${missions.length} · ${activeScu} SCU`}
               </h2>
               <div
                 className="panel-actions icon-actions"
@@ -1082,8 +1615,49 @@ export default function App() {
                 >
                   <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden>
                     <path fill="currentColor" d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5z" />
+                </svg>
+                </button>
+                <button
+                  type="button"
+                  className={`ghost icon-btn${missionsRearrangeMode ? ' active' : ''}`}
+                  disabled={missions.length < 2}
+                  onClick={() => setMissionsRearrangeMode((v) => !v)}
+                  title={
+                    missionsRearrangeMode
+                      ? 'Done rearranging'
+                      : 'Rearrange missions'
+                  }
+                  aria-label={
+                    missionsRearrangeMode
+                      ? 'Done rearranging'
+                      : 'Rearrange missions'
+                  }
+                  aria-pressed={missionsRearrangeMode}
+                >
+                  <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden>
+                    <path
+                      fill="currentColor"
+                      d="M4 7h16v2H4V7zm0 4h16v2H4v-2zm0 4h10v2H4v-2z"
+                    />
                   </svg>
                 </button>
+                {missionsRearrangeMode ? (
+                  <button
+                    type="button"
+                    className="ghost icon-btn"
+                    disabled={missions.length < 2}
+                    onClick={sortMissionsByCodeAction}
+                    title="Sort by code"
+                    aria-label="Sort by code"
+                  >
+                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden>
+                      <path
+                        fill="currentColor"
+                        d="M7 4h2v12h3l-4 5-4-5h3V4zm8 15h2V7h3l-4-5-4 5h3v12z"
+                      />
+                    </svg>
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="ghost icon-btn"
@@ -1101,7 +1675,7 @@ export default function App() {
                       fill="currentColor"
                       d="M12.5 8c-2.65 0-5.05 1-6.9 2.6L3 8v6h6l-2.25-2.25A7.96 7.96 0 0 1 12.5 10c3.04 0 5.64 1.7 6.94 4.2l1.8-.9C19.6 10.2 16.3 8 12.5 8z"
                     />
-                  </svg>
+                </svg>
                 </button>
                 <button
                   type="button"
@@ -1120,7 +1694,7 @@ export default function App() {
                       fill="currentColor"
                       d="M11.5 8c2.65 0 5.05 1 6.9 2.6L21 8v6h-6l2.25-2.25A7.96 7.96 0 0 0 11.5 10c-3.04 0-5.64 1.7-6.94 4.2l-1.8-.9C4.4 10.2 7.7 8 11.5 8z"
                     />
-                  </svg>
+                </svg>
                 </button>
                 <button
                   type="button"
@@ -1135,7 +1709,7 @@ export default function App() {
                       fill="currentColor"
                       d="M6 7h12v2H6V7zm2 3h2v8H8v-8zm3 0h2v8h-2v-8zm3 0h2v8h-2v-8zM9 4h6l1 1h4v2H4V5h4l1-1z"
                     />
-                  </svg>
+                </svg>
                 </button>
               </div>
               <span className="collapse-arrow" aria-hidden>
@@ -1157,61 +1731,157 @@ export default function App() {
             />
 
             {!missionsCollapsed && (
-              <ul className="mission-list">
+              <div className="mission-list-wrap">
+                <div
+                  ref={missionActionProbeRef}
+                  className="mission-action-fit-probe"
+                  aria-hidden
+                >
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    className="ghost mission-action-probe-btn"
+                  >
+                    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                      <path
+                        fill="currentColor"
+                        d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z"
+                      />
+                    </svg>
+                    <span>Edit</span>
+                  </button>
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    className="ghost danger mission-action-probe-btn"
+                  >
+                    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                      <path
+                        fill="currentColor"
+                        d="M6 7h12v2H6V7zm2 3h2v8H8v-8zm3 0h2v8h-2v-8zm3 0h2v8h-2v-8zM9 4h6l1 1h4v2H4V5h4l1-1z"
+                      />
+                    </svg>
+                    <span>Remove</span>
+                  </button>
+                </div>
+              <ul
+                ref={missionListRef}
+                className={`mission-list${missionActionText ? ' mission-actions-use-text' : ''}`}
+              >
                 {missions.length === 0 && (
                   <li className="empty">No missions yet. Click Add to create one.</li>
                 )}
-                {missions.map((m) => {
-                  const objs = legacyMissionToObjectives(m)
-                  const commodityLabel =
-                    missionCommodityLabel(objs) || m.commodity
+                {missions.map((m, index) => {
+                  const on = isMissionEnabled(m)
                   return (
-                  <li key={m.id} className="mission-row selected mission-row-compact">
+                  <li
+                    key={m.id}
+                    className={`mission-row selected mission-row-compact${on ? '' : ' mission-row-off'}`}
+                  >
+                    <label className="mission-enable" title={on ? 'On for routing' : 'Off for routing'}>
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={() => toggleMissionEnabled(m.id)}
+                        aria-label={`${on ? 'Disable' : 'Enable'} mission ${m.code}`}
+                      />
+                    </label>
                     <div className="mission-main">
-                      <strong>
-                        <span className="mission-code">{m.code}</span> {m.name}
-                      </strong>
-                      <p className="mission-meta">
-                        {m.giver ? <span className="tag">{m.giver}</span> : null}
-                        {m.rank ? <span className="tag">{m.rank}</span> : null}
-                        <span className="tag">{typeLabel(m.haulType)}</span>
-                        {missionTotalScu(objs) || m.totalScu} SCU
-                        {commodityLabel ? ` ${commodityLabel}` : ''}
-                        {m.rewardAuec != null ? ` · ${formatAuec(m.rewardAuec)}` : ''}
-                        {` · crate ${m.maxUnitScu}`}
-                        {objs.length > 1 ? ` · ${objs.length} objectives` : ''}
+                      <div className="mission-title-row">
+                        <span className="mission-code">{m.code}</span>
+                        <AutoScrollName text={m.name} />
+                      </div>
+                      <MissionPriorityTags
+                        mission={m}
+                        typeLabel={typeLabel}
+                        sharedKeys={sharedMissionTagKeys}
+                        onLayout={onMissionTagLayout}
+                      />
+                      <p className="stops-line stops-compact">
+                        <span className="lbl">In</span>
+                        <StopLocationList stops={m.pickups} getName={locationLabel} />
                       </p>
                       <p className="stops-line stops-compact">
-                        <span className="lbl">In</span>{' '}
-                        {formatStopSummary(m.pickups, locationLabel, m.maxUnitScu)}
-                        <span className="stops-sep">·</span>
-                        <span className="lbl">Out</span>{' '}
-                        {formatStopSummary(m.dropoffs, locationLabel, m.maxUnitScu)}
+                        <span className="lbl">Out</span>
+                        <StopLocationList
+                          stops={m.dropoffs}
+                          getName={locationLabel}
+                        />
                       </p>
                     </div>
-                    <div className="mission-actions">
-                      <button
-                        type="button"
-                        className="ghost"
-                        onClick={() => {
-                          setEditingMissionId(m.id)
-                          setModalStep('edit')
-                        }}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        className="ghost danger"
-                        onClick={() => removeMission(m.id)}
-                      >
-                        Remove
-                      </button>
+                    <div
+                      className={`mission-actions${missionsRearrangeMode ? ' rearranging' : ''}`}
+                    >
+                      {missionsRearrangeMode ? (
+                        <>
+                          <button
+                            type="button"
+                            className="ghost icon-btn"
+                            disabled={index === 0}
+                            onClick={() => moveMission(m.id, -1)}
+                            title="Move up"
+                            aria-label={`Move ${m.code} up`}
+                          >
+                            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                              <path fill="currentColor" d="M7 14l5-5 5 5H7z" />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost icon-btn"
+                            disabled={index >= missions.length - 1}
+                            onClick={() => moveMission(m.id, 1)}
+                            title="Move down"
+                            aria-label={`Move ${m.code} down`}
+                          >
+                            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                              <path fill="currentColor" d="M7 10l5 5 5-5H7z" />
+                            </svg>
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="ghost mission-action-btn"
+                            onClick={() => {
+                              setEditingMissionId(m.id)
+                              setModalStep('edit')
+                            }}
+                            title="Edit"
+                            aria-label={`Edit ${m.code}`}
+                          >
+                            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                              <path
+                                fill="currentColor"
+                                d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z"
+                              />
+                            </svg>
+                            <span className="mission-action-label">Edit</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost danger mission-action-btn"
+                            onClick={() => removeMission(m.id)}
+                            title="Remove"
+                            aria-label={`Remove ${m.code}`}
+                          >
+                            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                              <path
+                                fill="currentColor"
+                                d="M6 7h12v2H6V7zm2 3h2v8H8v-8zm3 0h2v8h-2v-8zm3 0h2v8h-2v-8zM9 4h6l1 1h4v2H4V5h4l1-1z"
+                              />
+                            </svg>
+                            <span className="mission-action-label">Remove</span>
+                          </button>
+                        </>
+                      )}
                     </div>
-                  </li>
+            </li>
                   )
                 })}
-              </ul>
+          </ul>
+              </div>
             )}
           </section>
         </aside>

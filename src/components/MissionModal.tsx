@@ -802,7 +802,7 @@ export function MissionModal({
               }}
             >
               {headerPrimary?.label ??
-                (step === 'add' ? 'Add mission' : 'Save changes')}
+                (step === 'add' ? 'Add' : 'Save')}
             </button>
           </div>
         </div>
@@ -864,7 +864,7 @@ export function MissionModal({
                   )
                 }
                 primaryLabel={
-                  multi && readyCount > 1 ? 'Add & next' : 'Add mission'
+                  multi && readyCount > 1 ? 'Add & next' : 'Add'
                 }
                 primaryDisabled={
                   Boolean(codeError) ||
@@ -1739,7 +1739,7 @@ function EditMissionBody({
         onObjectives={(next) => {
           commitEdit(() => setObjectives(cloneObjectives(next)))
         }}
-        primaryLabel="Save changes"
+        primaryLabel="Save"
         primaryDisabled={
           scanBusy || codeInvalid || objectivesHaveErrors(objectives)
         }

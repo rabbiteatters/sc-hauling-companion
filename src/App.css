@@ -84,18 +84,19 @@
   padding: 0.5rem 1.25rem 2.5rem;
   display: grid;
   gap: 1rem;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 @media (min-width: 980px) {
   .shell {
-    grid-template-columns: minmax(340px, 420px) 1fr;
+    grid-template-columns: minmax(0, 420px) minmax(0, 1fr);
     align-items: start;
   }
 
   .route-panel {
     position: sticky;
     top: 0.75rem;
+    min-width: 0;
   }
 }
 
@@ -103,6 +104,8 @@
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .panel {
@@ -112,6 +115,9 @@
   padding: 1.1rem 1.2rem 1.25rem;
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
   animation: rise 0.65s ease-out both;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .panel h2 {
@@ -207,10 +213,14 @@
 }
 
 .icon-actions {
-  flex-shrink: 0;
+  flex-shrink: 1;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.2rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .icon-btn {
@@ -609,6 +619,9 @@
   border-radius: 3px;
   background: rgba(10, 16, 22, 0.3);
   overflow: visible;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .loc-picker legend {
@@ -1076,6 +1089,12 @@ button.chip.on {
   width: 100%;
 }
 
+.mission-list-wrap {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .mission-list {
   list-style: none;
   margin: 0;
@@ -1085,6 +1104,8 @@ button.chip.on {
   gap: 0.28rem;
   max-height: 420px;
   overflow: auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .mission-row,
@@ -1097,39 +1118,217 @@ button.chip.on {
   background: rgba(10, 16, 22, 0.4);
   border: 1px solid rgba(148, 176, 196, 0.1);
   border-radius: 3px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .mission-row-compact {
+  align-items: flex-start;
+  gap: 0.35rem;
+  padding: 0.35rem 0.45rem;
+  overflow: hidden;
+}
+
+.mission-row-compact .mission-enable {
+  margin-top: 0.2rem;
+}
+
+.mission-row-compact .mission-actions {
+  margin-top: 0.05rem;
+}
+
+.mission-row-off {
+  opacity: 0.48;
+}
+
+.mission-enable {
+  display: flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.4rem 0.55rem;
+  flex-shrink: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+.mission-enable input {
+  width: 0.9rem;
+  height: 0.9rem;
+  accent-color: var(--ok, #48b46e);
+  cursor: pointer;
 }
 
 .mission-row-compact .mission-main {
   min-width: 0;
-  flex: 1;
-}
-
-.mission-row-compact strong {
-  font-size: 0.82rem;
-  line-height: 1.25;
-}
-
-.mission-row-compact .mission-meta {
-  margin: 0.08rem 0 0;
-  font-size: 0.72rem;
-  color: var(--muted);
-  white-space: nowrap;
+  flex: 1 1 0;
   overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.mission-row-compact .mission-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.mission-row-compact .mission-title-row .mission-code {
+  flex-shrink: 0;
+}
+
+.mission-row-compact .mission-name-scroll {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+  mask-image: linear-gradient(90deg, #000 88%, transparent);
+}
+
+.mission-row-compact .mission-name {
+  display: inline-block;
+  max-width: none;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--fog);
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.mission-row-compact .mission-name-scroll.is-overflow .mission-name {
+  padding-inline-end: 1.25rem;
+  animation: mission-name-marquee 9s linear infinite alternate;
+}
+
+.mission-row-compact .mission-name-scroll.is-overflow:hover .mission-name {
+  animation-play-state: paused;
+}
+
+@keyframes mission-name-marquee {
+  0%,
+  12% {
+    transform: translateX(0);
+  }
+  88%,
+  100% {
+    transform: translateX(calc(-1 * var(--scroll-dist, 0px)));
+  }
+}
+
+.mission-row-compact .mission-meta-track {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  row-gap: 0.2rem;
+}
+
+.mission-row-compact .mission-tags {
+  position: relative;
+  margin: 0.12rem 0 0;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.mission-row-compact .mission-tags-measure {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.25rem;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+}
+
+.mission-row-compact .mission-tags .mission-meta-track {
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.mission-row-compact .mission-tags .tag {
+  flex-shrink: 0;
+  margin-right: 0;
 }
 
 .mission-row-compact .stops-compact {
+  display: grid !important;
+  grid-template-columns: 1.8rem minmax(0, 1fr);
+  column-gap: 0.3rem;
+  align-items: start;
   margin: 0.1rem 0 0 !important;
   font-size: 0.7rem !important;
+  white-space: normal !important;
+}
+
+.mission-row-compact .stops-compact .lbl {
+  min-width: 0;
+  padding-top: 0.05rem;
+}
+
+.mission-row-compact .stops-compact .stops-text {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0;
+  min-width: 0;
+  overflow: visible;
+}
+
+.mission-row-compact .stops-compact .stops-text-measure {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: baseline;
   white-space: nowrap;
+  left: 0;
+  top: 0;
+}
+
+.mission-row-compact .stops-compact .stop-unit {
+  display: contents;
+}
+
+.mission-row-compact .stops-compact .stop-line-break {
+  flex-basis: 100%;
+  width: 100%;
+  height: 0;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.mission-row-compact .stops-compact .stop-chunk {
+  display: inline-flex;
+  align-items: baseline;
+  flex-shrink: 0;
+  max-width: 100%;
+}
+
+.mission-row-compact .stops-compact .stop-loc {
+  display: inline-block;
+  white-space: nowrap;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  font: inherit;
+}
+
+.mission-row-compact .stops-compact .stop-loc-measure {
+  flex-shrink: 0;
+  white-space: nowrap;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.mission-row-compact .stops-compact .stops-sep {
+  display: inline-block;
+  flex-shrink: 0;
+  margin: 0 0.35rem 0 0.2rem;
+  color: var(--steel);
 }
 
 .stops-sep {
@@ -1145,13 +1344,118 @@ button.chip.on {
 }
 
 .mission-row-compact .mission-actions {
-  flex-direction: row;
-  gap: 0.25rem;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.15rem;
+  flex-shrink: 0;
+  max-width: 100%;
+}
+
+.mission-row-compact .mission-actions.rearranging {
+  flex-direction: column;
 }
 
 .mission-row-compact .mission-actions .ghost {
-  padding: 0.25rem 0.45rem;
-  font-size: 0.72rem;
+  padding: 0.2rem 0.35rem;
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.mission-row-compact .mission-actions .icon-btn {
+  width: 1.45rem;
+  height: 1.45rem;
+  min-width: 1.45rem;
+  padding: 0 !important;
+}
+
+/* Measure Edit+Remove text width for fit switching */
+.mission-action-fit-probe {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: -1;
+  opacity: 0;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.15rem;
+  width: max-content;
+}
+
+.mission-action-fit-probe .mission-action-probe-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.35rem !important;
+  font-size: 0.68rem;
+  white-space: nowrap;
+  width: max-content;
+}
+
+.mission-action-fit-probe .mission-action-probe-btn svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+/* Default: icon-only Edit/Remove */
+.mission-row-compact .mission-actions .mission-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.45rem;
+  height: 1.45rem;
+  min-width: 1.45rem;
+  padding: 0 !important;
+  gap: 0;
+}
+
+.mission-row-compact .mission-actions .mission-action-btn svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+.mission-row-compact .mission-actions .mission-action-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Enough room: icon + text label together */
+.mission-list.mission-actions-use-text .mission-row-compact .mission-actions .mission-action-btn {
+  width: auto;
+  height: auto;
+  min-width: 0;
+  padding: 0.2rem 0.35rem !important;
+  gap: 0.25rem;
+}
+
+.mission-list.mission-actions-use-text .mission-row-compact .mission-actions .mission-action-btn svg {
+  display: block;
+}
+
+.mission-list.mission-actions-use-text .mission-row-compact .mission-actions .mission-action-label {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  clip-path: none;
+  white-space: nowrap;
+}
+
+.icon-actions .icon-btn.active {
+  border-color: rgba(72, 180, 110, 0.55);
+  background: rgba(72, 180, 110, 0.18);
+  color: var(--mint);
 }
 
 .modal-backdrop {
@@ -1248,11 +1552,12 @@ button.chip.on {
 
 .mission-title-code-group {
   flex-shrink: 0;
+  min-width: 7ch;
 }
 
 .mission-title-name-group {
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 auto;
+  min-width: 14ch;
 }
 
 .mission-title-shell {
@@ -1270,7 +1575,9 @@ button.chip.on {
 }
 
 .mission-title-code-shell {
-  max-width: 6.5rem;
+  min-width: 7ch;
+  max-width: 7ch;
+  box-sizing: content-box;
   background: rgba(72, 180, 110, 0.18);
   border: 1px solid rgba(72, 180, 110, 0.4);
 }
@@ -1299,15 +1606,17 @@ button.chip.on {
 
 .mission-title-name-shell {
   flex: 1;
-  min-width: 0;
+  min-width: 14ch;
   background: rgba(10, 16, 22, 0.45);
   border: 1px solid rgba(148, 176, 196, 0.22);
 }
 
 .mission-title-code {
   flex: 0 0 auto;
-  min-width: 3.4rem;
-  max-width: 5rem;
+  box-sizing: content-box;
+  min-width: 7ch;
+  max-width: 7ch;
+  width: 7ch;
   padding: 0.22rem 0.4rem;
   font-family: inherit;
   font-size: 0.78rem;
@@ -1328,7 +1637,7 @@ button.chip.on {
 
 .mission-title-name-wrap {
   flex: 1;
-  min-width: 0;
+  min-width: 14ch;
   display: flex;
   align-items: center;
   gap: 0.2rem;
@@ -1336,7 +1645,7 @@ button.chip.on {
 
 .mission-title-name {
   flex: 1;
-  min-width: 0;
+  min-width: 14ch;
   padding: 0.22rem 0.45rem;
   font-family: inherit;
   font-size: 0.82rem;
@@ -1372,7 +1681,7 @@ button.chip.on {
 
 .mission-title-marquee {
   flex: 1;
-  min-width: 0;
+  min-width: 14ch;
   display: flex;
   gap: 2.5rem;
   overflow: hidden;
@@ -1382,6 +1691,71 @@ button.chip.on {
   color: var(--fog, #e8eef2);
   cursor: default;
   mask-image: linear-gradient(90deg, #000 82%, transparent);
+}
+
+/* Mobile: heading + actions on row 1; code + name full width on row 2 */
+@media (max-width: 640px) {
+  .mission-modal-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'title actions'
+      'fields fields'
+      'error error';
+    align-items: center;
+    column-gap: 0.45rem;
+    row-gap: 0.35rem;
+  }
+
+  .mission-modal-title-block {
+    display: contents;
+  }
+
+  .mission-modal-title-block h2 {
+    grid-area: title;
+    min-width: 0;
+  }
+
+  .mission-modal-title-fields {
+    grid-area: fields;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .mission-modal-head .panel-actions {
+    grid-area: actions;
+    align-self: start;
+    justify-self: end;
+    margin-left: 0;
+  }
+
+  .mission-modal-title-block .mission-code-error {
+    grid-area: error;
+    max-width: none;
+  }
+
+  .mission-title-code-group {
+    flex: 0 0 auto;
+    min-width: 7ch;
+  }
+
+  .mission-title-name-group {
+    flex: 1 1 auto;
+    min-width: min(100%, 14ch);
+  }
+
+  .mission-title-code-shell,
+  .mission-title-code {
+    min-width: 7ch;
+    max-width: 7ch;
+  }
+
+  .mission-title-name-shell,
+  .mission-title-name-wrap,
+  .mission-title-name,
+  .mission-title-marquee {
+    min-width: min(100%, 14ch);
+  }
 }
 
 .mission-title-marquee.is-overflow .mission-title-marquee-text {
@@ -1821,6 +2195,10 @@ button.primary.danger {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--steel);
+}
+
+.stops-line .stops-text {
+  min-width: 0;
 }
 
 .empty {

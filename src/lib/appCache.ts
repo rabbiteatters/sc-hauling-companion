@@ -217,6 +217,7 @@ function sanitizeMission(raw: unknown): Mission | null {
       m.source === 'ocr' || m.source === 'demo' || m.source === 'manual'
         ? m.source
         : 'manual',
+    ...(m.enabled === false ? { enabled: false as const } : {}),
   })
 }
 

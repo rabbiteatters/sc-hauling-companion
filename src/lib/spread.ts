@@ -273,6 +273,28 @@ export function demoMissionCodeNumber(code: string): number {
   return m ? Number(m[1]) : 0
 }
 
+/** True unless explicitly disabled. */
+export function isMissionEnabled(m: Pick<Mission, 'enabled'>): boolean {
+  return m.enabled !== false
+}
+
+/** Case-insensitive natural/alphanumeric compare on mission codes. */
+export function compareMissionCode(a: string, b: string): number {
+  return a.trim().localeCompare(b.trim(), undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  })
+}
+
+/** Stable sort copy by mission code. */
+export function sortMissionsByCode(list: Mission[]): Mission[] {
+  return [...list].sort((x, y) => {
+    const c = compareMissionCode(x.code, y.code)
+    if (c !== 0) return c
+    return x.id.localeCompare(y.id)
+  })
+}
+
 /** Next unused C-series code given missions already in the list. */
 export function nextMissionCode(existing: Mission[]): string {
   let max = 0
@@ -415,12 +437,15 @@ export function formatStopSummary(
   stops: MissionStop[],
   getName: (id: string) => string,
   maxUnitScu?: number,
+  opts?: { includeScu?: boolean },
 ): string {
+  const includeScu = opts?.includeScu !== false
   return stops
     .map((s) => {
+      const mark = s.confirmed ? '✓' : ''
+      if (!includeScu) return `${getName(s.locationId)}${mark}`
       const boxes =
         maxUnitScu != null ? ` [${formatBoxCounts(scuToBoxes(s.scu, maxUnitScu))}]` : ''
-      const mark = s.confirmed ? '✓' : ''
       return `${getName(s.locationId)} (${s.scu}${boxes})${mark}`
     })
     .join(' · ')

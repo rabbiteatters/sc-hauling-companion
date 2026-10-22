@@ -94,6 +94,8 @@ export interface Mission {
   /** Cargo legs — source of truth when present */
   objectives: MissionObjective[]
   source: 'manual' | 'ocr' | 'demo'
+  /** When false, listed but skipped by routing. Default true. */
+  enabled?: boolean
 }
 
 /** Normalized OCR crop rectangles (fractions of image width/height). */
