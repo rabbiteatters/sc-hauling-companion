@@ -6,6 +6,9 @@ import {
   type OcrBatchItem,
 } from './components/MissionModal'
 import { RouteSummary } from './components/RouteSummary'
+import { FieldClearButton } from './components/FieldClearButton'
+import { ShipPicker } from './components/ShipPicker'
+import { StartLocationPicker } from './components/StartLocationPicker'
 import { DEMO_MISSION_COUNT, createDemoMissions } from './data/demoMissions'
 import {
   createScmdbDemoMission,
@@ -27,6 +30,7 @@ import {
   missionCommodityLabel,
   missionTotalScu,
   objectiveRouteParts,
+  objectivesHaveErrors,
 } from './lib/objectives'
 import { parseMissionText, readMissionImage } from './lib/ocr'
 import { formatAuec, optimizeRoute } from './lib/optimizer'
@@ -44,7 +48,6 @@ import {
   getAllLocations,
   getLocation,
   locationLabel,
-  locationsByBody,
 } from './store/catalog'
 import type { HaulType, Mission, OptimizedRoute } from './types'
 import './App.css'
@@ -87,6 +90,7 @@ export default function App() {
   const [ocrFormKey, setOcrFormKey] = useState(0)
   const fileRef = useRef<HTMLInputElement>(null)
   const cacheReady = useRef(false)
+  const shipInitDone = useRef(false)
   const ocrCancelRef = useRef(false)
   const lastOcrFillSig = useRef('')
   const demoIndexRef = useRef(
@@ -94,11 +98,10 @@ export default function App() {
   )
 
   const capacityScu = useMemo(() => {
-    if (capacityMode === 'custom') return Math.max(1, customScu)
-    return catalog.ships.find((s) => s.id === shipId)?.cargoScu ?? 1
+    if (capacityMode === 'custom') return Math.max(0, customScu)
+    return catalog.ships.find((s) => s.id === shipId)?.cargoScu ?? 0
   }, [capacityMode, customScu, shipId, catalog.ships])
 
-  const byBody = useMemo(() => locationsByBody(), [catalog.locations, catalog.loadedAt])
 
   // Persist all selectable choices
   useEffect(() => {
@@ -132,10 +135,16 @@ export default function App() {
   useEffect(() => {
     if (!catalog.loadedAt) return
 
-    if (!shipId || !catalog.ships.some((s) => s.id === shipId)) {
+    const shipOk = Boolean(shipId && catalog.ships.some((s) => s.id === shipId))
+    if (shipOk) {
+      shipInitDone.current = true
+    } else if (shipId || !shipInitDone.current) {
+      // Stale id, or first catalog load with empty selection — pick a default.
+      // After init, an empty shipId means the user cleared it (0 SCU hold).
       const c2 = catalog.ships.find((s) => /C2 Hercules/i.test(s.name))
       const max = catalog.ships.find((s) => /Freelancer MAX/i.test(s.name))
       setShipId(c2?.id ?? max?.id ?? catalog.ships[0]?.id ?? '')
+      shipInitDone.current = true
     }
 
     if (!startId || !getLocation(startId)) {
@@ -366,9 +375,7 @@ export default function App() {
         ? scannedObjectives
         : draftObjectives
 
-    if (!objectives.some((o) => o.pickups.length > 0 && o.dropoffs.length > 0)) {
-      return
-    }
+    if (objectivesHaveErrors(objectives)) return
 
     const route = objectiveRouteParts(objectives)
     const total = Math.max(
@@ -959,7 +966,17 @@ export default function App() {
             >
               <h2 className="collapse-title">
                 {configCollapsed
-                  ? `Config · ${capacityScu} SCU · ${getLocation(startId)?.shortName ?? '—'}`
+                  ? (() => {
+                      const start = getLocation(startId)?.shortName ?? '—'
+                      if (capacityMode === 'ship') {
+                        const ship = catalog.ships.find((s) => s.id === shipId)
+                        const shipPart = ship
+                          ? `${ship.name} · ${ship.cargoScu} SCU`
+                          : `${capacityScu} SCU`
+                        return `Config · ${shipPart} · ${start}`
+                      }
+                      return `Config · ${capacityScu} SCU · ${start}`
+                    })()
                   : 'Run configuration'}
               </h2>
               <span className="collapse-arrow" aria-hidden>
@@ -987,49 +1004,43 @@ export default function App() {
                 </div>
 
                 {capacityMode === 'ship' ? (
-                  <label className="field">
-                    <span>Ship (UEX)</span>
-                    <select value={shipId} onChange={(e) => setShipId(e.target.value)}>
-                      {catalog.ships.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} — {s.cargoScu} SCU
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <ShipPicker
+                    ships={catalog.ships}
+                    value={shipId}
+                    onChange={setShipId}
+                  />
                 ) : (
                   <label className="field">
                     <span>Max cargo capacity (SCU)</span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={customScu}
-                      onChange={(e) => setCustomScu(Number(e.target.value))}
-                    />
+                    <div className="commodity-picker-bar">
+                      <div className="field-input-wrap">
+                        <input
+                          type="number"
+                          min={0}
+                          className="commodity-picker-search"
+                          value={customScu}
+                          onChange={(e) => setCustomScu(Number(e.target.value))}
+                        />
+                        <FieldClearButton
+                          visible={customScu !== 0}
+                          label="Clear capacity"
+                          onClear={() => setCustomScu(0)}
+                        />
+                      </div>
+                    </div>
                   </label>
                 )}
 
-                <label className="field">
-                  <span>Starting location (UEX)</span>
-                  <select value={startId} onChange={(e) => setStartId(e.target.value)}>
-                    {Object.entries(byBody).map(([body, locs]) => (
-                      <optgroup key={body} label={body}>
-                        {locs.map((l) => (
-                          <option key={l.id} value={l.id}>
-                            {l.name}
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                </label>
+                <StartLocationPicker
+                  locations={catalog.locations}
+                  value={startId}
+                  onChange={setStartId}
+                />
 
                 <div className="capacity-chip">
                   Hold <strong>{capacityScu} SCU</strong>
                   <span className="dot" />
                   {getLocation(startId)?.shortName ?? '—'}
-                  <span className="dot" />
-                  {catalog.ships.length} ships · {catalog.locations.length} locations
                 </div>
               </>
             )}

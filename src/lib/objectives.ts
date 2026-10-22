@@ -307,6 +307,19 @@ export function objectiveLoadBalance(obj: MissionObjective): ObjectiveLoadBalanc
   }
 }
 
+/** True when any objective is incomplete or has load mismatch (block Add/Save). */
+export function objectivesHaveErrors(objectives: MissionObjective[]): boolean {
+  if (!objectives.length) return true
+  for (const o of objectives) {
+    // Commodity required, plus at least one pickup and one dropoff place.
+    if (!o.commodity.trim()) return true
+    if (!o.pickups.length || !o.dropoffs.length) return true
+    if (o.totalScu <= 0) return true
+    if (objectiveLoadBalance(o).mismatch) return true
+  }
+  return false
+}
+
 /** Edit one location's SCU — does not change Total or the other side. */
 export function setObjectiveStopScu(
   obj: MissionObjective,

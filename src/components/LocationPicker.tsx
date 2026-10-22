@@ -7,6 +7,7 @@ import {
 } from '../lib/bodies'
 import { getLocation, locationLabel } from '../store/catalog'
 import type { Location } from '../types'
+import { FieldClearButton } from './FieldClearButton'
 
 export const MAX_LOCATION_PICKS = 5
 
@@ -516,12 +517,22 @@ export function LocationPicker({
 
         <label className="loc-search field">
           <span className="sr-only">Search {legend.toLowerCase()}</span>
-          <input
-            type="search"
-            value={query}
-            placeholder={`Search ${legend.toLowerCase()}…`}
-            onChange={(e) => setQuery(e.target.value)}
-          />
+          <div className="commodity-picker-bar">
+            <div className="field-input-wrap">
+              <input
+                type="search"
+                className="commodity-picker-search"
+                value={query}
+                placeholder={`Search ${legend.toLowerCase()}…`}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              <FieldClearButton
+                visible={Boolean(query.trim())}
+                label="Clear search"
+                onClear={() => setQuery('')}
+              />
+            </div>
+          </div>
         </label>
       </div>
 

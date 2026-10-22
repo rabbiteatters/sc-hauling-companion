@@ -10,6 +10,7 @@ import {
   createEmptyObjective,
   legacyMissionToObjectives,
   objectiveRouteParts,
+  objectivesHaveErrors,
   type DraftObjective,
 } from '../lib/objectives'
 import { syncDraftFromObjectives, type DraftCache } from '../lib/appCache'
@@ -20,6 +21,7 @@ import { GiverPicker } from './GiverPicker'
 import { HaulTypePicker } from './HaulTypePicker'
 import { ObjectivesEditor } from './ObjectivesEditor'
 import { OcrRegionSetup } from './OcrRegionSetup'
+import { FieldClearButton } from './FieldClearButton'
 import { RankPicker } from './RankPicker'
 
 export type MissionModalStep = 'add' | 'edit'
@@ -81,10 +83,6 @@ function autoNameFromObjectives(
     pickupCount: route.pickupCount,
     dropoffCount: route.dropoffCount,
   })
-}
-
-function objectivesHaveStops(objectives: DraftObjective[]): boolean {
-  return objectives.some((o) => o.pickups.length > 0 && o.dropoffs.length > 0)
 }
 
 function formSnapKey(s: MissionFormSnap): string {
@@ -868,7 +866,10 @@ export function MissionModal({
                 primaryLabel={
                   multi && readyCount > 1 ? 'Add & next' : 'Add mission'
                 }
-                primaryDisabled={Boolean(codeError)}
+                primaryDisabled={
+                  Boolean(codeError) ||
+                  objectivesHaveErrors(draft.objectives ?? [])
+                }
                 onPrimary={onAddManual}
                 onCancel={onClose}
                 registerPrimary={registerPrimary}
@@ -1739,9 +1740,11 @@ function EditMissionBody({
           commitEdit(() => setObjectives(cloneObjectives(next)))
         }}
         primaryLabel="Save changes"
-        primaryDisabled={scanBusy || codeInvalid}
+        primaryDisabled={
+          scanBusy || codeInvalid || objectivesHaveErrors(objectives)
+        }
         onPrimary={() => {
-          if (codeInvalid || !objectivesHaveStops(objectives)) return
+          if (codeInvalid || objectivesHaveErrors(objectives)) return
           const route = objectiveRouteParts(objectives)
           const total = objectives.reduce((s, o) => s + o.totalScu, 0)
           onSave(
@@ -1845,7 +1848,7 @@ function MissionForm({
   const onPrimaryRef = useRef(onPrimary)
   onPrimaryRef.current = onPrimary
   const primaryDisabledNow =
-    Boolean(primaryDisabled) || !objectivesHaveStops(objectives)
+    Boolean(primaryDisabled) || objectivesHaveErrors(objectives)
 
   useEffect(() => {
     if (!registerPrimary) return
@@ -1898,15 +1901,25 @@ function MissionForm({
         </label>
         <label className="field">
           <span>Reward</span>
-          <input
-            type="text"
-            inputMode="numeric"
-            autoComplete="off"
-            spellCheck={false}
-            value={formatRewardDigits(rewardAuec)}
-            onChange={(e) => onRewardAuec(parseRewardDigits(e.target.value))}
-            placeholder="0"
-          />
+          <div className="commodity-picker-bar">
+            <div className="field-input-wrap">
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                spellCheck={false}
+                className="commodity-picker-search"
+                value={formatRewardDigits(rewardAuec)}
+                onChange={(e) => onRewardAuec(parseRewardDigits(e.target.value))}
+                placeholder="0"
+              />
+              <FieldClearButton
+                visible={rewardAuec > 0}
+                label="Clear reward"
+                onClear={() => onRewardAuec(0)}
+              />
+            </div>
+          </div>
         </label>
       </div>
 

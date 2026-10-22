@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { FieldClearButton } from './FieldClearButton'
 
 interface Props {
   label: string
@@ -76,20 +77,30 @@ export function SuggestPopup({
     <div className="suggest-popup field" ref={rootRef}>
       <span>{label}</span>
       <div className="commodity-picker-bar">
-        <input
-          id={`${idPrefix}-search`}
-          type="text"
-          className="commodity-picker-search"
-          value={value}
-          placeholder={placeholder}
-          onChange={(e) => {
-            onChange(e.target.value)
-            setOpen(true)
-          }}
-          onFocus={() => setOpen(true)}
-          autoComplete="off"
-          spellCheck={false}
-        />
+        <div className="field-input-wrap">
+          <input
+            id={`${idPrefix}-search`}
+            type="text"
+            className="commodity-picker-search"
+            value={value}
+            placeholder={placeholder}
+            onChange={(e) => {
+              onChange(e.target.value)
+              setOpen(true)
+            }}
+            onFocus={() => setOpen(true)}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <FieldClearButton
+            visible={Boolean(value.trim())}
+            label={`Clear ${label.toLowerCase()}`}
+            onClear={() => {
+              onChange('')
+              setOpen(true)
+            }}
+          />
+        </div>
         <button
           type="button"
           className={`commodity-picker-toggle ghost${open ? ' open' : ''}`}
