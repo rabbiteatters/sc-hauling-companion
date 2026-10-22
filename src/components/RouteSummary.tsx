@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { formatAuec, formatDistance } from '../lib/optimizer'
+import { formatAuec, formatDistance, formatHoldCapacity } from '../lib/optimizer'
 import { enrichStopsWithBoxes, groupRouteByLocation } from '../lib/routeGroups'
 import {
   allowedCrateSizes,
@@ -179,7 +179,9 @@ export function RouteSummary({
           <div className="route-step-card">
             <span>Total load</span>
             <strong>
-              {stepStats.holdAfter}/{capacityScu} SCU
+              {capacityScu > 0
+                ? `${stepStats.holdAfter}/${capacityScu} SCU`
+                : `${stepStats.holdAfter} SCU`}
             </strong>
             <p className="route-step-sub">hold after this stop</p>
           </div>
@@ -217,7 +219,9 @@ export function RouteSummary({
         <div>
           <span>Peak load</span>
           <strong>
-            {route.peakLoad}/{route.capacityScu} SCU
+            {route.capacityScu > 0
+              ? `${route.peakLoad}/${route.capacityScu} SCU`
+              : `${route.peakLoad} SCU`}
           </strong>
         </div>
         <div>
@@ -236,7 +240,7 @@ export function RouteSummary({
             <span className="badge">START</span>
             <div className="group-main">
               <strong>{getLocation(startId)?.name}</strong>
-              <p>Empty hold · {capacityScu} SCU capacity</p>
+              <p>Empty hold · {formatHoldCapacity(capacityScu)} capacity</p>
             </div>
             <ElevatorNote locationId={startId} />
           </div>

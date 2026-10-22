@@ -33,7 +33,7 @@ import {
   objectivesHaveErrors,
 } from './lib/objectives'
 import { parseMissionText, readMissionImage } from './lib/ocr'
-import { formatAuec, optimizeRoute } from './lib/optimizer'
+import { formatAuec, formatHoldCapacity, optimizeRoute } from './lib/optimizer'
 import {
   DEFAULT_MAX_UNIT_SCU,
   amendPickupActual,
@@ -972,10 +972,10 @@ export default function App() {
                         const ship = catalog.ships.find((s) => s.id === shipId)
                         const shipPart = ship
                           ? `${ship.name} · ${ship.cargoScu} SCU`
-                          : `${capacityScu} SCU`
+                          : formatHoldCapacity(capacityScu)
                         return `Config · ${shipPart} · ${start}`
                       }
-                      return `Config · ${capacityScu} SCU · ${start}`
+                      return `Config · ${formatHoldCapacity(capacityScu)} · ${start}`
                     })()
                   : 'Run configuration'}
               </h2>
@@ -1038,7 +1038,7 @@ export default function App() {
                 />
 
                 <div className="capacity-chip">
-                  Hold <strong>{capacityScu} SCU</strong>
+                  Hold <strong>{formatHoldCapacity(capacityScu)}</strong>
                   <span className="dot" />
                   {getLocation(startId)?.shortName ?? '—'}
                 </div>

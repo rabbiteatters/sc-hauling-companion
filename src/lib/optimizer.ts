@@ -21,20 +21,31 @@ interface CargoJob {
 const EXACT_NODE_MAX = 14
 const EXACT_WORK_BUDGET = 1_500_000
 
+/** 0 / unset hold → unlimited space for routing (no capacity trip splits). */
+export function resolveHoldCapacity(capacityScu: number): number {
+  return capacityScu > 0 ? capacityScu : Number.POSITIVE_INFINITY
+}
+
+export function formatHoldCapacity(capacityScu: number): string {
+  return capacityScu > 0 ? `${capacityScu} SCU` : 'Unlimited SCU'
+}
+
 export function optimizeRoute(
   missions: Mission[],
   startLocationId: string,
   capacityScu: number,
 ): OptimizedRoute {
-  if (!getLocation(startLocationId)) return emptyRoute(capacityScu, missions)
+  const reportedCapacity = Math.max(0, capacityScu)
+  const hold = resolveHoldCapacity(reportedCapacity)
+  if (!getLocation(startLocationId)) return emptyRoute(reportedCapacity, missions)
 
-  const workable = missions.filter((m) => isFeasible(m, capacityScu))
+  const workable = missions.filter((m) => isFeasible(m, hold))
   // Still attempt every mission; infeasible ones are kept but may force multi-trip / partial
   const jobs = expandJobs(workable.length ? workable : missions)
-  if (!jobs.length) return emptyRoute(capacityScu, missions)
+  if (!jobs.length) return emptyRoute(reportedCapacity, missions)
 
-  const planned = planJobs(jobs, startLocationId, capacityScu)
-  if (!planned) return emptyRoute(capacityScu, missions)
+  const planned = planJobs(jobs, startLocationId, hold)
+  if (!planned) return emptyRoute(reportedCapacity, missions)
 
   const reward = missions.reduce((s, m) => {
     const total = missionCargoTotal(m)
@@ -49,7 +60,7 @@ export function optimizeRoute(
     totalDistance: planned.totalDistance,
     totalReward: reward,
     totalCargoScu: cargo,
-    capacityScu,
+    capacityScu: reportedCapacity,
     tripCount: planned.tripCount,
     method: planned.method,
     peakLoad: planned.peakLoad,
@@ -78,7 +89,9 @@ function missionCargoTotal(m: Mission): number {
 }
 
 function isFeasible(m: Mission, capacity: number): boolean {
-  if (capacity < 1 || missionCargoTotal(m) <= 0) return false
+  if (missionCargoTotal(m) <= 0) return false
+  // Finite hold must be able to carry at least something; Infinity = unlimited.
+  if (Number.isFinite(capacity) && capacity < 1) return false
   const objectives = legacyMissionToObjectives(m)
   if (!objectives.some((o) => o.pickups.length && o.dropoffs.length)) return false
   return objectives.every(
@@ -188,7 +201,8 @@ function planJobs(
   peakLoad: number
 } | null {
   const total = jobs.reduce((s, j) => s + j.scu, 0)
-  if (total <= capacity) {
+  // Unlimited hold (Infinity) or cargo fits → one tour.
+  if (!Number.isFinite(capacity) || total <= capacity) {
     const single = solveSingleTour(jobs, startId, capacity)
     if (!single) return null
     return { ...single, tripCount: 1 }
