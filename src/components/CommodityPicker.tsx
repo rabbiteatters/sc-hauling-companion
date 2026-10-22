@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CommodityInfo } from '../api/uex'
+import { FieldClearButton } from './FieldClearButton'
 
 interface Props {
   commodities: CommodityInfo[]
@@ -124,20 +125,30 @@ export function CommodityPicker({
     <div className="commodity-picker field" ref={rootRef}>
       <span>Commodity</span>
       <div className="commodity-picker-bar">
-        <input
-          id={`${idPrefix}-search`}
-          type="text"
-          className="commodity-picker-search"
-          value={value}
-          placeholder="Type to match…"
-          onChange={(e) => {
-            onChange(e.target.value)
-            setFocused(true)
-          }}
-          onFocus={() => setFocused(true)}
-          autoComplete="off"
-          spellCheck={false}
-        />
+        <div className="field-input-wrap">
+          <input
+            id={`${idPrefix}-search`}
+            type="text"
+            className="commodity-picker-search"
+            value={value}
+            placeholder="Type to match…"
+            onChange={(e) => {
+              onChange(e.target.value)
+              setFocused(true)
+            }}
+            onFocus={() => setFocused(true)}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <FieldClearButton
+            visible={Boolean(value.trim())}
+            label="Clear commodity"
+            onClear={() => {
+              onChange('')
+              setFocused(true)
+            }}
+          />
+        </div>
         <button
           type="button"
           className={`commodity-picker-toggle ghost${expanded ? ' open' : ''}`}
