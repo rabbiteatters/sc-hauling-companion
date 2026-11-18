@@ -199,6 +199,7 @@ function sanitizeMission(raw: unknown): Mission | null {
         ? clampMissionCode(m.code)
         : 'C01',
     name: String(m.name),
+    ...(m.nameAuto === true ? { nameAuto: true as const } : {}),
     haulType,
     rank: rank
       ? (HAUL_RANKS as string[]).includes(rank)

@@ -403,14 +403,21 @@ export function collectCrateSizes(
     if (size != null && !found.includes(size)) found.push(size)
   }
 
+  const sizeToken = '((?:\\d{1,2})|[bB&])'
   const strict = [
-    /(?:all\s+)?([0-9bB&])\s*scu\s+or\s+smaller/gi,
-    /max(?:imum)?\s*(?:container|box|crate)?\s*(?:size)?[:\s]*([0-9bB&])\s*scu/gi,
-    /containers?\s+(?:of\s+)?(?:up\s+to\s+)?([0-9bB&])\s*scu\s+or\s+smaller/gi,
+    new RegExp(`(?:all\\s+)?(?<!\\d)${sizeToken}\\s*scu\\s+or\\s+smaller`, 'gi'),
+    new RegExp(
+      `max(?:imum)?\\s*(?:container|box|crate)?\\s*(?:size)?[:\\s]*(?<!\\d)${sizeToken}\\s*scu`,
+      'gi',
+    ),
+    new RegExp(
+      `containers?\\s+(?:of\\s+)?(?:up\\s+to\\s+)?(?<!\\d)${sizeToken}\\s*scu\\s+or\\s+smaller`,
+      'gi',
+    ),
   ]
   const loose = [
-    /(?:up\s+to|no\s+larger\s+than)\s+([0-9bB&])\s*scu/gi,
-    /\b([0-9bB&])\s*scu\b/gi,
+    new RegExp(`(?:up\\s+to|no\\s+larger\\s+than)\\s+(?<!\\d)${sizeToken}\\s*scu`, 'gi'),
+    new RegExp(`\\b${sizeToken}\\s*scu\\b`, 'gi'),
   ]
 
   for (const re of strict) {

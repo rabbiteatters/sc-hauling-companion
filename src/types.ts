@@ -76,6 +76,8 @@ export interface Mission {
   /** Short label e.g. c01, c02 — stable while the mission is in the list */
   code: string
   name: string
+  /** Title matches the generated haul name, so a share can rebuild it. */
+  nameAuto?: boolean
   /** In-game haul kind: Stellar Medium Haul, Planetary, Interstellar, … */
   haulType: HaulType
   /** Contract rank: Trainee, Rookie, Junior, … */

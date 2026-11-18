@@ -6,8 +6,8 @@ import {
 } from './objectives'
 import type { HaulType, Mission, MissionObjective, MissionStop } from '../types'
 
-/** Legal Star Citizen cargo crate sizes (powers of 2). */
-export const CRATE_SIZES = [1, 2, 4, 8, 16, 32, 64] as const
+/** Legal Star Citizen cargo crate sizes. 24 sits between 16 and 32. */
+export const CRATE_SIZES = [1, 2, 4, 8, 16, 24, 32, 64] as const
 export type CrateSize = (typeof CRATE_SIZES)[number]
 
 export const DEFAULT_MAX_UNIT_SCU: CrateSize = 8
@@ -43,7 +43,7 @@ export function spreadCargo(
 }
 
 /**
- * Break an SCU pile into individual legal crates (1/2/4/8/16/32/64),
+ * Break an SCU pile into individual legal crates (1/2/4/8/16/24/32/64),
  * never exceeding maxUnitScu.
  */
 export function scuToBoxes(scu: number, maxUnitScu: number = DEFAULT_MAX_UNIT_SCU): number[] {

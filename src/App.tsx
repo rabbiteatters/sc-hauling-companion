@@ -36,6 +36,7 @@ import {
   loadRouteSession,
   readShareHash,
   saveRouteSession,
+  withAutoMissionNames,
   type ShareSnapshot,
 } from './lib/share'
 import { buildAutoMissionName } from './lib/haulTypes'
@@ -761,16 +762,24 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (!catalog.loadedAt) return
+    setMissions((prev) => withAutoMissionNames(prev))
+  }, [catalog.loadedAt, catalog.locations])
+
+  useEffect(() => {
     if (!shareNeedsRoute.current) return
     if (shareGate !== 'done' || !catalog.loadedAt || !startId) return
     if (!getLocation(startId)) return
+    const titled = withAutoMissionNames(missions)
+    if (titled !== missions) {
+      setMissions(titled)
+      return
+    }
     shareNeedsRoute.current = false
-    const ready = repairMissionLocations(missions)
-    if (ready !== missions) setMissions(ready)
+    const ready = repairMissionLocations(titled)
+    if (ready !== titled) setMissions(ready)
     setRoute(optimizeRoute(ready.filter(isMissionEnabled), startId, capacityScu))
-    setDoneGroups(new Set())
     setRouteRearrange(false)
-    setRouteStep(0)
   }, [shareGate, catalog.loadedAt, startId, missions, capacityScu])
 
   useEffect(() => {
