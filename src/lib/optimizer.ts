@@ -35,6 +35,12 @@ interface RouteSeed {
 
 const EXACT_NODE_MAX = 14
 const EXACT_WORK_BUDGET = 1_500_000
+/**
+ * Extra cost for leaving a hub and coming back.
+ * A hub is where one contract is delivered and the next is collected.
+ * One stop there beats a shorter tour that crosses back later.
+ */
+const HUB_REVISIT_PENALTY = 1_000_000
 
 /** 0 / unset hold → unlimited space for routing (no capacity trip splits). */
 export function resolveHoldCapacity(capacityScu: number): number {
@@ -323,7 +329,16 @@ function solveSingleTour(
   const { nodes, mapped, start } = buildTourGraph(jobs, startId, seed?.preloadedIds)
   const dist = buildDistMatrix(nodes)
   const n = nodes.length
-  const input = { n, dist, capacity, start, jobs: mapped, loadOffset }
+  const input = {
+    n,
+    dist,
+    capacity,
+    start,
+    jobs: mapped,
+    loadOffset,
+    nodes,
+    hubs: hubLocationIds(jobs),
+  }
 
   let order: number[] | null = null
   let method: 'exact' | 'heuristic' = 'heuristic'
@@ -521,6 +536,52 @@ function buildDistMatrix(nodes: string[]): number[][] {
   return dist
 }
 
+/**
+ * A station that is the only dropoff of one objective and the only pickup of
+ * another. Deliver and collect there on the same visit instead of returning.
+ */
+function hubLocationIds(jobs: CargoJob[]): Set<string> {
+  const groups = new Map<string, CargoJob[]>()
+  for (const j of jobs) {
+    const key = j.id.slice(0, j.id.lastIndexOf(':'))
+    const list = groups.get(key) ?? []
+    list.push(j)
+    groups.set(key, list)
+  }
+  const soleDrops = new Set<string>()
+  const solePicks = new Set<string>()
+  for (const list of groups.values()) {
+    const drops = new Set(list.map((j) => j.dropoffId))
+    const picks = new Set(list.map((j) => j.pickupId))
+    if (drops.size === 1) soleDrops.add([...drops][0])
+    if (picks.size === 1) solePicks.add([...picks][0])
+  }
+  const hubs = new Set<string>()
+  for (const id of soleDrops) if (solePicks.has(id)) hubs.add(id)
+  return hubs
+}
+
+/** Flight cost. Coming back to a hub after leaving it is almost never worth it. */
+function stepCost(
+  last: number,
+  v: number,
+  mask: number,
+  dist: number[][],
+  nodes: string[],
+  hubs: ReadonlySet<string>,
+): number {
+  let cost = dist[last][v]
+  const id = nodes[v]
+  if (!id || nodes[last] === id || !hubs.has(id)) return cost
+  for (let i = 0; i < nodes.length; i++) {
+    if (i !== v && nodes[i] === id && (mask & (1 << i)) !== 0) {
+      cost += HUB_REVISIT_PENALTY
+      break
+    }
+  }
+  return cost
+}
+
 type JobMap = CargoJob & { pickup: number; dest: number; preloaded?: boolean }
 
 function loadForMask(mask: number, jobs: JobMap[], loadOffset = 0): number {
@@ -557,8 +618,10 @@ function solveExact(input: {
   start: number
   jobs: JobMap[]
   loadOffset?: number
+  nodes: string[]
+  hubs: ReadonlySet<string>
 }): number[] | null | 'too-big' {
-  const { n, dist, capacity, start, jobs } = input
+  const { n, dist, capacity, start, jobs, nodes, hubs } = input
   const loadOffset = input.loadOffset ?? 0
   if (n > EXACT_NODE_MAX) return 'too-big'
   const full = (1 << n) - 1
@@ -601,7 +664,7 @@ function solveExact(input: {
           if (loadForMask(nmask, jobs, loadOffset) > cap) continue
           if (++work > EXACT_WORK_BUDGET) return 'too-big'
           const ne = ensure(nmask)
-          const cost = base + dist[last][v]
+          const cost = base + stepCost(last, v, mask, dist, nodes, hubs)
           if (cost < ne.cost[v]) {
             ne.cost[v] = cost
             ne.par[v] = last
@@ -644,6 +707,8 @@ function solveHeuristic(input: {
   start: number
   jobs: JobMap[]
   loadOffset?: number
+  nodes: string[]
+  hubs: ReadonlySet<string>
 }): number[] | null {
   const loadOffset = input.loadOffset ?? 0
   const seed = greedyFrom(
@@ -652,6 +717,8 @@ function solveHeuristic(input: {
     input.dist,
     input.capacity,
     input.jobs,
+    input.nodes,
+    input.hubs,
     loadOffset,
   )
   if (!seed) return null
@@ -661,6 +728,8 @@ function solveHeuristic(input: {
     input.capacity,
     input.start,
     input.jobs,
+    input.nodes,
+    input.hubs,
     loadOffset,
   )
 }
@@ -671,6 +740,8 @@ function greedyFrom(
   dist: number[][],
   cap: number,
   jobs: JobMap[],
+  nodes: string[],
+  hubs: ReadonlySet<string>,
   loadOffset = 0,
 ): number[] | null {
   const order = [start]
@@ -683,8 +754,9 @@ function greedyFrom(
       if (mask & (1 << v)) continue
       if (!canVisit(mask, v, jobs)) continue
       if (loadForMask(mask | (1 << v), jobs, loadOffset) > cap) continue
-      if (dist[last][v] < bestD) {
-        bestD = dist[last][v]
+      const d = stepCost(last, v, mask, dist, nodes, hubs)
+      if (d < bestD) {
+        bestD = d
         next = v
       }
     }
@@ -710,9 +782,19 @@ function orderFeasible(
   return true
 }
 
-function orderDistance(order: number[], dist: number[][]): number {
+function orderCost(
+  order: number[],
+  dist: number[][],
+  nodes: string[],
+  hubs: ReadonlySet<string>,
+): number {
   let t = 0
-  for (let i = 1; i < order.length; i++) t += dist[order[i - 1]][order[i]]
+  let mask = 0
+  for (let i = 0; i < order.length; i++) {
+    const v = order[i]
+    if (i > 0) t += stepCost(order[i - 1], v, mask, dist, nodes, hubs)
+    mask |= 1 << v
+  }
   return t
 }
 
@@ -722,10 +804,12 @@ function localSearch(
   cap: number,
   start: number,
   jobs: JobMap[],
+  nodes: string[],
+  hubs: ReadonlySet<string>,
   loadOffset = 0,
 ): number[] {
   let best = seed.slice()
-  let bestD = orderDistance(best, dist)
+  let bestD = orderCost(best, dist, nodes, hubs)
   let improved = true
   while (improved) {
     improved = false
@@ -734,7 +818,7 @@ function localSearch(
         const cand = best.slice(0, i).concat(best.slice(i, j + 1).reverse(), best.slice(j + 1))
         if (cand[0] !== start) continue
         if (!orderFeasible(cand, jobs, cap, loadOffset)) continue
-        const d = orderDistance(cand, dist)
+        const d = orderCost(cand, dist, nodes, hubs)
         if (d < bestD - 1e-9) {
           best = cand
           bestD = d
