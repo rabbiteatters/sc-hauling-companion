@@ -48,7 +48,7 @@ import {
   objectivesHaveErrors,
 } from './lib/objectives'
 import { parseMissionText, readMissionImage } from './lib/ocr'
-import { formatHoldCapacity, moveRouteGroup, optimizeRoute, optimizeRouteFollowing, resequenceRouteStops } from './lib/optimizer'
+import { formatHoldCapacity, moveRouteGroup, optimizeRoute, optimizeRouteFollowing, repairMissionLocations, resequenceRouteStops } from './lib/optimizer'
 import { groupRouteByLocation, leadingDoneCount, followingDoneIndices } from './lib/routeGroups'
 import {
   DEFAULT_MAX_UNIT_SCU,
@@ -496,6 +496,7 @@ export default function App() {
   const cacheReady = useRef(false)
   const shipInitDone = useRef(false)
   const shareShipFallback = useRef<{ name: string; capacityScu: number } | null>(null)
+  const shareNeedsRoute = useRef(false)
   const ocrCancelRef = useRef(false)
   const lastOcrFillSig = useRef('')
   const demoIndexRef = useRef(
@@ -714,6 +715,7 @@ export default function App() {
     setUndoStack([])
     setRedoStack([])
     setRoute(snap.route)
+    shareNeedsRoute.current = !snap.route
     setDoneGroups(new Set(snap.done))
     setRouteRearrange(false)
     setRouteStep(snap.step)
@@ -757,6 +759,19 @@ export default function App() {
     // Apply whenever a share hash arrives, including a link opened in this tab.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    if (!shareNeedsRoute.current) return
+    if (shareGate !== 'done' || !catalog.loadedAt || !startId) return
+    if (!getLocation(startId)) return
+    shareNeedsRoute.current = false
+    const ready = repairMissionLocations(missions)
+    if (ready !== missions) setMissions(ready)
+    setRoute(optimizeRoute(ready.filter(isMissionEnabled), startId, capacityScu))
+    setDoneGroups(new Set())
+    setRouteRearrange(false)
+    setRouteStep(0)
+  }, [shareGate, catalog.loadedAt, startId, missions, capacityScu])
 
   useEffect(() => {
     if (shareNote !== 'copied') return
@@ -1115,10 +1130,11 @@ export default function App() {
     const next = missions.map((m) =>
       m.id === missionId ? amendPickupActual(m, locationId, actualScu) : m,
     )
-    setMissions(next)
+    const ready = repairMissionLocations(next)
+    setMissions(ready)
     if (startId) {
       setRoute(
-        optimizeRoute(next.filter(isMissionEnabled), startId, capacityScu),
+        optimizeRoute(ready.filter(isMissionEnabled), startId, capacityScu),
       )
       setDoneGroups(new Set())
       setRouteRearrange(false)
@@ -1222,7 +1238,9 @@ export default function App() {
 
   function runOptimize() {
     if (!startId) return
-    setRoute(optimizeRoute(activeMissions, startId, capacityScu))
+    const ready = repairMissionLocations(missions)
+    if (ready !== missions) setMissions(ready)
+    setRoute(optimizeRoute(ready.filter(isMissionEnabled), startId, capacityScu))
     setDoneGroups(new Set())
     setRouteRearrange(false)
     setRouteStep(0)
@@ -1260,8 +1278,10 @@ export default function App() {
     if (resequenced) prefix = resequenced
     const fromId = fromLocationId ?? prefix[prefix.length - 1]?.locationId
     if (!fromId) return
+    const ready = repairMissionLocations(missions)
+    if (ready !== missions) setMissions(ready)
     const next = optimizeRouteFollowing(
-      activeMissions,
+      ready.filter(isMissionEnabled),
       capacityScu,
       prefix,
       fromId,

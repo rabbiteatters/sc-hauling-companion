@@ -5,8 +5,18 @@ import {
   fetchShips,
   type CommodityInfo,
 } from '../api/uex'
+import {
+  locationsShareScope,
+  type HaulScope,
+} from '../lib/haulScope'
 import { listScmdbGivers } from '../lib/scmdbDemo'
 import type { Location, Ship } from '../types'
+
+/** Already-accepted stops a new match must stay compatible with. */
+export interface HaulMatchContext {
+  scope: HaulScope
+  anchors: Location[]
+}
 
 export interface CatalogState {
   ships: Ship[]
@@ -56,6 +66,27 @@ export function getAllLocations(): Location[] {
 
 export function getLocation(id: string): Location | undefined {
   return customLocations.get(id) ?? state.locations.find((l) => l.id === id)
+}
+
+/**
+ * Turn a saved stop id back into a catalog location.
+ * Custom ids from a bad scan ("Dudiey Daughters at the") prefer the real station.
+ */
+export function resolveStoredLocation(id: string): Location | undefined {
+  const known = getLocation(id)
+  if (known && !known.id.startsWith('custom-')) return known
+  const words = id
+    .replace(/^custom-/, '')
+    .replace(/-/g, ' ')
+    .replace(/\bat the$/, '')
+    .trim()
+  const hit = words
+    ? (findLocationByName(words) ?? matchOcrLocationName(words))
+    : undefined
+  if (hit && !hit.id.startsWith('custom-')) return hit
+  if (known) return known
+  if (!words) return undefined
+  return ensureLocation(words)
 }
 
 export function locationLabel(id: string): string {
@@ -144,7 +175,15 @@ export function getNyxGatewayPyro(): Location {
  * All catalog hits for a raw contract name.
  * Gateways are excluded unless the query mentions gateway/jump.
  */
-export function findAllLocationsByName(raw: string): Location[] {
+function locationFitsHaul(loc: Location, match?: HaulMatchContext): boolean {
+  if (!match || match.scope === 'interstellar' || match.anchors.length === 0) return true
+  return match.anchors.every((anchor) => locationsShareScope(anchor, loc, match.scope))
+}
+
+export function findAllLocationsByName(
+  raw: string,
+  match?: HaulMatchContext,
+): Location[] {
   const q = normalize(raw)
   if (!q) return []
   const allowGateways = /gateway|jump|nyx\s+gate/i.test(raw)
@@ -153,6 +192,7 @@ export function findAllLocationsByName(raw: string): Location[] {
   const fuzzy: { loc: Location; score: number }[] = []
 
   for (const loc of getAllLocations()) {
+    if (loc.id.startsWith('custom-')) continue
     if (!allowGateways && isGateway(loc)) continue
     const names = [loc.name, loc.shortName, loc.id.replace(/-/g, ' '), ...(loc.aliases ?? [])]
     let locExact = false
@@ -178,9 +218,11 @@ export function findAllLocationsByName(raw: string): Location[] {
     else if (bestFuzzy >= 0.55) fuzzy.push({ loc, score: bestFuzzy })
   }
 
-  if (exact.length) return exact
-  fuzzy.sort((a, b) => b.score - a.score)
-  return fuzzy.map((f) => f.loc)
+  const ranked = exact.length
+    ? exact
+    : fuzzy.sort((a, b) => b.score - a.score).map((f) => f.loc)
+  if (!match) return ranked
+  return ranked.filter((loc) => locationFitsHaul(loc, match))
 }
 
 export function findLocationByName(raw: string): Location | undefined {
@@ -209,17 +251,24 @@ function editDistance(a: string, b: string): number {
  * Match OCR / contract place text to a catalog location.
  * Uses exact/includes first, then edit-distance for common OCR typos.
  */
-export function matchOcrLocationName(raw: string): Location | undefined {
+export function matchOcrLocationName(
+  raw: string,
+  match?: HaulMatchContext,
+): Location | undefined {
   const trimmed = raw
-    .replace(/\s+at\s+the\s+L\d.*/i, '')
-    .replace(/\s+at\s+the\s+.*/i, '')
+    .replace(/\s+at\s+the(?:\s+.*)?$/i, '')
     .replace(/\s+above\s+.*/i, '')
     .replace(/^to\s+/i, '')
     .trim()
   if (!trimmed) return undefined
 
-  const hit = findLocationByName(trimmed)
-  if (hit) return hit
+  const unscoped = findAllLocationsByName(trimmed)
+  const scoped = match
+    ? unscoped.filter((loc) => locationFitsHaul(loc, match))
+    : unscoped
+  if (scoped[0]) return scoped[0]
+  // A catalog name in the wrong system is not a typo for somewhere else.
+  if (match && unscoped.length) return undefined
 
   const q = normalize(trimmed)
   if (q.length < 3) return undefined
@@ -228,7 +277,9 @@ export function matchOcrLocationName(raw: string): Location | undefined {
 
   let best: { loc: Location; score: number } | null = null
   for (const loc of getAllLocations()) {
+    if (loc.id.startsWith('custom-')) continue
     if (!allowGateways && isGateway(loc)) continue
+    if (!locationFitsHaul(loc, match)) continue
     const names = [loc.name, loc.shortName, loc.id.replace(/-/g, ' '), ...(loc.aliases ?? [])]
     for (const name of names) {
       const n = normalize(name)
@@ -288,10 +339,10 @@ function isExactNameMatch(raw: string, loc: Location): boolean {
 export function resolveContractLocation(
   rawName: string,
   ctx: LocationResolveCtx = createLocationResolveCtx(),
-): Location {
+  match?: HaulMatchContext,
+): Location | undefined {
   const trimmed = rawName
-    .replace(/\s+at\s+the\s+L\d.*/i, '')
-    .replace(/\s+at\s+the\s+.*/i, '')
+    .replace(/\s+at\s+the(?:\s+.*)?$/i, '')
     .replace(/\s+above\s+.*/i, '')
     .trim()
   const rawKey = normalize(trimmed)
@@ -303,13 +354,17 @@ export function resolveContractLocation(
     return nyx
   }
 
-  const matches = findAllLocationsByName(trimmed)
-  const primary = matches[0] ?? matchOcrLocationName(trimmed)
+  const unscoped = findAllLocationsByName(trimmed)
+  const scoped = match
+    ? unscoped.filter((loc) => locationFitsHaul(loc, match))
+    : unscoped
+  const primary = scoped[0] ?? matchOcrLocationName(trimmed, match)
 
   if (primary) {
     const exact = isExactNameMatch(trimmed, primary)
     const duplicateName = Boolean(rawKey && ctx.usedRaws.has(rawKey))
-    // Only the in-game duplicate-name quirk — not “fuzzy hit same ID as dropoff”
+    // Only the in-game duplicate-name quirk — not “fuzzy hit same ID as dropoff”.
+    // The quirk still points at Nyx even when that crosses the haul's system.
     const duplicateExactStop = exact && ctx.usedIds.has(primary.id)
     if (
       ctx.nyxOnDuplicate &&
@@ -326,19 +381,30 @@ export function resolveContractLocation(
     return primary
   }
 
-  return ensureLocation(trimmed, ctx)
+  if (match && (unscoped.length > 0 || matchOcrLocationName(trimmed))) return undefined
+  return ensureLocation(trimmed, ctx, scopeHint(match))
+}
+
+function scopeHint(
+  match?: HaulMatchContext,
+): { system?: string; body?: string } | undefined {
+  const anchor = match?.anchors[0]
+  if (!match || !anchor || match.scope === 'interstellar') return undefined
+  if (match.scope === 'stellar') return { system: anchor.system }
+  return { system: anchor.system, body: anchor.body }
 }
 
 /** Never drop an unknown stop — register a custom location near system average. */
 export function ensureLocation(
   rawName: string,
   ctx?: LocationResolveCtx | Set<string>,
+  hint?: { system?: string; body?: string },
 ): Location {
   const resolveCtx: LocationResolveCtx =
     ctx instanceof Set
       ? { usedIds: ctx, usedRaws: new Set(), nyxOnDuplicate: false }
       : (ctx ?? createLocationResolveCtx())
-  const trimmed = rawName.replace(/\s+at\s+the\s+.*/i, '').replace(/\s+above\s+.*/i, '').trim()
+  const trimmed = rawName.replace(/\s+at\s+the(?:\s+.*)?$/i, '').replace(/\s+above\s+.*/i, '').trim()
   const rawKey = normalize(trimmed)
   const nyx = getNyxGatewayPyro()
   const existing = findLocationByName(trimmed)
@@ -382,6 +448,17 @@ export function ensureLocation(
 
   const known = customLocations.get(id)
   if (known) {
+    if (hint?.system && (known.system !== hint.system || (hint.body && known.body !== hint.body))) {
+      const placed: Location = {
+        ...known,
+        system: hint.system,
+        body: hint.body ?? known.body,
+      }
+      customLocations.set(id, placed)
+      resolveCtx.usedIds.add(placed.id)
+      if (rawKey) resolveCtx.usedRaws.add(rawKey)
+      return placed
+    }
     if (
       resolveCtx.nyxOnDuplicate &&
       resolveCtx.usedIds.has(known.id) &&
@@ -396,12 +473,16 @@ export function ensureLocation(
     return known
   }
 
+  const hinted = hint?.system
+    ? state.locations.filter((l) => l.system === hint.system && !isGateway(l))
+    : []
   const pyroStations = state.locations.filter(
     (l) => l.system === 'pyro' && !isGateway(l) && /station|service|nest|fuel|depot/i.test(l.name),
   )
-  const pool = pyroStations.length
+  const pyroPool = pyroStations.length
     ? pyroStations
     : state.locations.filter((l) => l.system === 'pyro' && !isGateway(l))
+  const pool = hinted.length ? hinted : pyroPool
   const usePool = pool.length ? pool : state.locations
   const avg = usePool.reduce(
     (a, l) => ({ x: a.x + l.x, y: a.y + l.y, z: a.z + l.z }),
@@ -412,9 +493,9 @@ export function ensureLocation(
     id,
     name: trimmed || 'Unknown location',
     shortName: (trimmed || 'Unknown').slice(0, 28),
-    body: 'Unknown',
+    body: hint?.body ?? 'Unknown',
     type: 'landing',
-    system: pool.length ? 'pyro' : 'unknown',
+    system: hint?.system ?? (pool.length ? 'pyro' : 'unknown'),
     x: avg.x / n,
     y: avg.y / n,
     z: avg.z / n,

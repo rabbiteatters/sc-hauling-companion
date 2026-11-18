@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { haulScopeOf, retainStopsForHaul } from '../lib/haulScope'
 import { buildAutoMissionName } from '../lib/haulTypes'
 import type { OcrRegionTexts } from '../lib/ocr'
 import {
@@ -7,6 +8,7 @@ import {
   normalizeCrateSize,
 } from '../lib/spread'
 import {
+  changeObjectiveLocationIds,
   createEmptyObjective,
   legacyMissionToObjectives,
   objectiveRouteParts,
@@ -1788,6 +1790,48 @@ function EditMissionBody({
   )
 }
 
+function pruneObjectivesForHaul(
+  objectives: DraftObjective[],
+  locations: Location[],
+  haul: HaulType,
+  maxUnitScu: number,
+): DraftObjective[] | null {
+  const scope = haulScopeOf(haul)
+  if (scope === 'interstellar') return null
+  const byId = new Map(locations.map((loc) => [loc.id, loc]))
+  let anchors: Location[] = []
+  let changed = false
+  const next = objectives.map((obj) => {
+    const pick = retainStopsForHaul(
+      obj.pickups,
+      (id) => byId.get(id),
+      scope,
+      anchors,
+    )
+    anchors = pick.anchors
+    const drop = retainStopsForHaul(
+      obj.dropoffs,
+      (id) => byId.get(id),
+      scope,
+      anchors,
+    )
+    anchors = drop.anchors
+    let updated = obj
+    const pickIds = pick.kept.map((stop) => stop.locationId)
+    const dropIds = drop.kept.map((stop) => stop.locationId)
+    if (pickIds.join('|') !== obj.pickups.map((stop) => stop.locationId).join('|')) {
+      updated = changeObjectiveLocationIds(updated, 'pickup', pickIds, maxUnitScu)
+      changed = true
+    }
+    if (dropIds.join('|') !== obj.dropoffs.map((stop) => stop.locationId).join('|')) {
+      updated = changeObjectiveLocationIds(updated, 'dropoff', dropIds, maxUnitScu)
+      changed = true
+    }
+    return updated
+  })
+  return changed ? next : null
+}
+
 function MissionForm({
   idPrefix,
   haulType,
@@ -1881,7 +1925,16 @@ function MissionForm({
         <HaulTypePicker
           idPrefix={`${idPrefix}-haul`}
           value={haulType}
-          onChange={onHaulType}
+          onChange={(next) => {
+            onHaulType(next)
+            const pruned = pruneObjectivesForHaul(
+              objectives,
+              locations,
+              next,
+              maxUnitScu,
+            )
+            if (pruned) onObjectives(pruned)
+          }}
         />
       </div>
 
@@ -1927,6 +1980,7 @@ function MissionForm({
         idPrefix={idPrefix}
         objectives={objectives}
         maxUnitScu={maxUnitScu}
+        haulType={haulType}
         locations={locations}
         commodities={commodities}
         onChange={onObjectives}

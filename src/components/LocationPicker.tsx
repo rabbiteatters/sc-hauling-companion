@@ -118,7 +118,8 @@ export function LocationPicker({
         systemsBooted.current = true
         return systems
       }
-      return prev.filter((s) => systems.includes(s))
+      const retained = prev.filter((s) => systems.includes(s))
+      return retained.length ? retained : systems
     })
   }, [systems])
 
@@ -133,6 +134,7 @@ export function LocationPicker({
         return allBodies
       }
       const retained = prev.filter((b) => allBodies.includes(b))
+      if (!retained.length) return allBodies
       const missing = allBodies.filter((b) => !prev.includes(b))
       const hadAllPrior =
         prev.length > 0 &&

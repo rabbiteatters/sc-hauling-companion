@@ -7,7 +7,7 @@
 import { legacyMissionToObjectives, missionTotalScu } from './objectives'
 import { buildDropoffs, buildStops, DEFAULT_MAX_UNIT_SCU } from './spread'
 import { groupRouteByLocation } from './routeGroups'
-import { distanceBetween, getLocation } from '../store/catalog'
+import { distanceBetween, getLocation, resolveStoredLocation } from '../store/catalog'
 import type {
   Mission,
   MissionObjective,
@@ -45,31 +45,56 @@ export function formatHoldCapacity(capacityScu: number): string {
   return capacityScu > 0 ? `${capacityScu} SCU` : 'Unlimited SCU'
 }
 
+/** Point unscanned custom ids at the real station when the name is close enough. */
+export function repairMissionLocations(missions: Mission[]): Mission[] {
+  let changed = false
+  const mapStop = (stop: MissionStop): MissionStop => {
+    const custom = stop.locationId.startsWith('custom-')
+    if (!custom && getLocation(stop.locationId)) return stop
+    const loc = resolveStoredLocation(stop.locationId)
+    if (!loc || loc.id === stop.locationId) return stop
+    changed = true
+    return { ...stop, locationId: loc.id }
+  }
+  const next = missions.map((m) => ({
+    ...m,
+    pickups: (m.pickups ?? []).map(mapStop),
+    dropoffs: (m.dropoffs ?? []).map(mapStop),
+    objectives: m.objectives?.map((o) => ({
+      ...o,
+      pickups: o.pickups.map(mapStop),
+      dropoffs: o.dropoffs.map(mapStop),
+    })),
+  }))
+  return changed ? next : missions
+}
+
 export function optimizeRoute(
   missions: Mission[],
   startLocationId: string,
   capacityScu: number,
 ): OptimizedRoute {
+  const ready = repairMissionLocations(missions)
   const reportedCapacity = Math.max(0, capacityScu)
   const hold = resolveHoldCapacity(reportedCapacity)
-  if (!getLocation(startLocationId)) return emptyRoute(reportedCapacity, missions)
+  if (!getLocation(startLocationId)) return emptyRoute(reportedCapacity, ready)
 
-  const workable = missions.filter((m) => isFeasible(m, hold))
+  const workable = ready.filter((m) => isFeasible(m, hold))
   // Still attempt every mission; infeasible ones are kept but may force multi-trip / partial
-  const jobs = expandJobs(workable.length ? workable : missions)
-  if (!jobs.length) return emptyRoute(reportedCapacity, missions)
+  const jobs = expandJobs(workable.length ? workable : ready)
+  if (!jobs.length) return emptyRoute(reportedCapacity, ready)
 
   const planned = planJobs(jobs, startLocationId, hold)
-  if (!planned) return emptyRoute(reportedCapacity, missions)
+  if (!planned) return emptyRoute(reportedCapacity, ready)
 
-  const reward = missions.reduce((s, m) => {
+  const reward = ready.reduce((s, m) => {
     const total = missionCargoTotal(m)
     return s + (m.rewardAuec ?? total * 1000)
   }, 0)
-  const cargo = missions.reduce((s, m) => s + missionCargoTotal(m), 0)
+  const cargo = ready.reduce((s, m) => s + missionCargoTotal(m), 0)
 
   return {
-    selectedMissionIds: missions.map((m) => m.id),
+    selectedMissionIds: ready.map((m) => m.id),
     skippedMissionIds: [],
     stops: planned.stops,
     totalDistance: planned.totalDistance,
@@ -443,23 +468,40 @@ function buildTourGraph(
   preloadedIds?: ReadonlySet<string>,
 ): { nodes: string[]; mapped: JobMap[]; start: number } {
   const preloaded = preloadedIds ?? new Set<string>()
-  const cargoLocs: string[] = []
-  const seen = new Set<string>()
+  const uses = new Map<string, { pick: boolean; drop: boolean }>()
+  const touch = (id: string, role: 'pick' | 'drop') => {
+    const cur = uses.get(id) ?? { pick: false, drop: false }
+    cur[role] = true
+    uses.set(id, cur)
+  }
   for (const j of jobs) {
-    const ids = preloaded.has(j.id) ? [j.dropoffId] : [j.pickupId, j.dropoffId]
-    for (const id of ids) {
-      if (seen.has(id)) continue
-      seen.add(id)
+    if (!preloaded.has(j.id)) touch(j.pickupId, 'pick')
+    touch(j.dropoffId, 'drop')
+  }
+
+  // A station that both loads and unloads needs two visits. One node cannot
+  // be picked up from before it is delivered to, and delivered to before it
+  // is picked up from.
+  const cargoLocs: string[] = []
+  const pickupIndex = new Map<string, number>()
+  const dropIndex = new Map<string, number>()
+  for (const [id, role] of uses) {
+    if (role.pick) {
       cargoLocs.push(id)
+      pickupIndex.set(id, cargoLocs.length)
+    }
+    if (role.drop) {
+      cargoLocs.push(id)
+      dropIndex.set(id, cargoLocs.length)
     }
   }
-  // nodes[0] = depot (start). nodes[1..] = cargo stops (may duplicate startId).
+
+  // nodes[0] = depot (start). nodes[1..] = cargo stops (may repeat a location).
   const nodes = [startId, ...cargoLocs]
-  const stopIndex = new Map(cargoLocs.map((id, i) => [id, i + 1]))
   const mapped: JobMap[] = jobs.map((j) => ({
     ...j,
-    pickup: preloaded.has(j.id) ? 0 : stopIndex.get(j.pickupId)!,
-    dest: stopIndex.get(j.dropoffId)!,
+    pickup: preloaded.has(j.id) ? 0 : pickupIndex.get(j.pickupId)!,
+    dest: dropIndex.get(j.dropoffId)!,
     preloaded: preloaded.has(j.id),
   }))
   return { nodes, mapped, start: 0 }
@@ -921,10 +963,11 @@ export function optimizeRouteFollowing(
   options?: { trustCargoAfter?: boolean },
 ): OptimizedRoute | null {
   if (!prefixStops.length || !getLocation(fromLocationId)) return null
+  const ready = repairMissionLocations(missions)
   const reportedCapacity = Math.max(0, capacityScu)
   const hold = resolveHoldCapacity(reportedCapacity)
-  const workable = missions.filter((m) => isFeasible(m, hold))
-  const jobs = expandJobs(workable.length ? workable : missions)
+  const workable = ready.filter((m) => isFeasible(m, hold))
+  const jobs = expandJobs(workable.length ? workable : ready)
   if (!jobs.length) return null
 
   const { open, aboard, holdScu } = consumeDoneStops(
@@ -948,14 +991,14 @@ export function optimizeRouteFollowing(
   const suffix = planned.stops.map((s) => ({ ...s, trip: tripBase + s.trip }))
   const stops = [...prefixStops, ...suffix]
   const prefixPeak = prefixStops.reduce((m, s) => Math.max(m, s.cargoAfter), 0)
-  const reward = missions.reduce((s, m) => {
+  const reward = ready.reduce((s, m) => {
     const total = missionCargoTotal(m)
     return s + (m.rewardAuec ?? total * 1000)
   }, 0)
-  const cargo = missions.reduce((s, m) => s + missionCargoTotal(m), 0)
+  const cargo = ready.reduce((s, m) => s + missionCargoTotal(m), 0)
 
   return {
-    selectedMissionIds: missions.map((m) => m.id),
+    selectedMissionIds: ready.map((m) => m.id),
     skippedMissionIds: [],
     stops,
     totalDistance: stops.reduce((s, x) => s + x.legDistance, 0),

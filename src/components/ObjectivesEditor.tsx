@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { CommodityInfo } from '../api/uex'
+import { locationsAllowedForHaul } from '../lib/haulScope'
 import { MAX_HAUL_STOPS, reconcileHaulStops } from '../lib/haulTypes'
 import {
   applyObjectiveTotalDelta,
@@ -23,6 +24,7 @@ interface Props {
   idPrefix: string
   objectives: DraftObjective[]
   maxUnitScu: number
+  haulType: string
   locations: Location[]
   commodities: CommodityInfo[]
   onChange: (next: DraftObjective[]) => void
@@ -32,6 +34,7 @@ export function ObjectivesEditor({
   idPrefix,
   objectives,
   maxUnitScu,
+  haulType,
   locations,
   commodities,
   onChange,
@@ -39,6 +42,18 @@ export function ObjectivesEditor({
   const list = objectives.length
     ? objectives
     : [createEmptyObjective({ commodity: '', totalScu: 0 })]
+
+  const scopeAnchors = list.flatMap((obj) =>
+    [...obj.pickups, ...obj.dropoffs].flatMap((stop) => {
+      const loc = locations.find((item) => item.id === stop.locationId)
+      return loc ? [loc] : []
+    }),
+  )
+  const allowedLocations = locationsAllowedForHaul(
+    locations,
+    haulType,
+    scopeAnchors,
+  )
 
   const [reorderUnlocked, setReorderUnlocked] = useState(false)
   const [expandedId, setExpandedId] = useState<string | null>(list[0]?.id ?? null)
@@ -323,7 +338,7 @@ export function ObjectivesEditor({
                   <LocationPicker
                     legend="Pickups"
                     idPrefix={`${idPrefix}-obj-${obj.id}-p`}
-                    locations={locations}
+                    locations={allowedLocations}
                     selectedIds={pickupIds}
                     peerSelectedCount={dropoffIds.length}
                     max={MAX_HAUL_STOPS}
@@ -383,7 +398,7 @@ export function ObjectivesEditor({
                   <LocationPicker
                     legend="Dropoffs"
                     idPrefix={`${idPrefix}-obj-${obj.id}-d`}
-                    locations={locations}
+                    locations={allowedLocations}
                     selectedIds={dropoffIds}
                     peerSelectedCount={pickupIds.length}
                     max={MAX_HAUL_STOPS}

@@ -9,8 +9,10 @@ import {
   matchOcrLocationName,
   createLocationResolveCtx,
   resolveContractLocation,
+  type HaulMatchContext,
 } from '../store/catalog'
-import type { HaulType, Mission, OcrRegionMap } from '../types'
+import { haulScopeOf, locationsShareScope } from './haulScope'
+import type { HaulType, Location, Mission, OcrRegionMap } from '../types'
 import {
   DEFAULT_HAUL_TYPE,
   inferHaulType,
@@ -314,6 +316,7 @@ const RE_FROM = /\bfrom\s+([A-Za-z][A-Za-z0-9\s'&.-]{2,40})/gi
 function alignTitleDestination(
   title: string | undefined,
   dropoffShortName: string,
+  match?: HaulMatchContext,
 ): string | undefined {
   if (!title) return undefined
   const m = title.match(/^(.*?\|\s*to\s+)(.+)$/i)
@@ -324,7 +327,7 @@ function alignTitleDestination(
     }
     return title
   }
-  const matched = matchOcrLocationName(m[2])
+  const matched = matchOcrLocationName(m[2], match)
   return `${m[1]}${matched?.shortName ?? dropoffShortName}`
 }
 
@@ -429,27 +432,35 @@ function findPickupsInText(
   dropoffIds: string[],
   /** 2nd identical collect name → Nyx (objectives crop only). */
   nyxOnDuplicateCollect: boolean,
+  match?: HaulMatchContext,
 ): string[] {
   const dropSet = new Set(dropoffIds.filter(Boolean))
   const pickupIds: string[] = []
   const seenPlaceKeys = new Set<string>()
   const nyx = getNyxGatewayPyro()
   const ctx = createLocationResolveCtx({ nyxOnDuplicate: false })
+  const anchors = [...(match?.anchors ?? [])]
+  const liveMatch = (): HaulMatchContext | undefined =>
+    match ? { scope: match.scope, anchors: [...anchors] } : undefined
 
   for (const raw of extractPickupRaws(objText)) {
     const key = placeKey(raw)
-    // In-game quirk: same collect place listed twice → 2nd is Nyx Gateway (Pyro)
+    // In-game quirk: same collect place listed twice → 2nd is Nyx Gateway (Pyro).
+    // That stop stays even when Nyx is outside the haul's system.
     if (nyxOnDuplicateCollect && key && seenPlaceKeys.has(key)) {
       if (!dropSet.has(nyx.id) && !pickupIds.includes(nyx.id)) {
         pickupIds.push(nyx.id)
+        anchors.push(nyx)
       }
       continue
     }
     if (key) seenPlaceKeys.add(key)
 
-    const loc = resolveContractLocation(raw, ctx)
+    const loc = resolveContractLocation(raw, ctx, liveMatch())
+    if (!loc) continue
     if (!dropSet.has(loc.id) && !pickupIds.includes(loc.id)) {
       pickupIds.push(loc.id)
+      anchors.push(loc)
     }
   }
 
@@ -458,6 +469,13 @@ function findPickupsInText(
     const lower = objText.toLowerCase()
     for (const loc of getAllLocations()) {
       if (dropSet.has(loc.id)) continue
+      if (
+        match &&
+        anchors.length > 0 &&
+        !anchors.every((anchor) => locationsShareScope(anchor, loc, match.scope))
+      ) {
+        continue
+      }
       const names = [loc.shortName, loc.name, ...(loc.aliases ?? [])]
       for (const name of names) {
         if (!name || name.length < 4) continue
@@ -492,10 +510,23 @@ function parseStellarHaul(
   if (!delivers.length) delivers = parseAllDeliverLines(text)
   if (!delivers.length) return null
 
+  const earlyTitle =
+    reconstructHaulTitle(titleText) || reconstructHaulTitle(fullFallback)
+  const parsedHaul =
+    parseHaulType(titleText) ??
+    parseHaulType(fullFallback) ??
+    parseHaulType(earlyTitle ?? '')
+  const scope = parsedHaul ? haulScopeOf(parsedHaul) : undefined
+  const anchors: Location[] = []
+  const matchFor = (): HaulMatchContext | undefined =>
+    scope ? { scope, anchors: [...anchors] } : undefined
+
   const dropCtx = createLocationResolveCtx({ nyxOnDuplicate: false })
   const dropoffs: { locationId: string; scu: number; shortName: string }[] = []
   for (const d of delivers) {
-    const loc = resolveContractLocation(d.dropRaw, dropCtx)
+    const loc = resolveContractLocation(d.dropRaw, dropCtx, matchFor())
+    if (!loc) continue
+    anchors.push(loc)
     const existing = dropoffs.find((x) => x.locationId === loc.id)
     if (existing) {
       existing.scu += d.totalScu
@@ -519,13 +550,13 @@ function parseStellarHaul(
   const pickupIds: string[] = []
   if (objectivesCrop) {
     const nyxOnDup = !isAlternatingDeliverCollectOrder(objectivesCrop)
-    pickupIds.push(...findPickupsInText(objectivesCrop, dropoffIds, nyxOnDup))
+    pickupIds.push(...findPickupsInText(objectivesCrop, dropoffIds, nyxOnDup, matchFor()))
   }
   if (!pickupIds.length) {
     const fallbackText =
       objectivesCrop && objectivesCrop !== fullFallback ? fullFallback : objText
     if (fallbackText && fallbackText !== objectivesCrop) {
-      pickupIds.push(...findPickupsInText(fallbackText, dropoffIds, false))
+      pickupIds.push(...findPickupsInText(fallbackText, dropoffIds, false, matchFor()))
     }
   }
   if (!pickupIds.length) return null
@@ -548,7 +579,7 @@ function parseStellarHaul(
     reconstructHaulTitle(titleText) || reconstructHaulTitle(fullFallback)
   const destLabel = dropoffs.length > 1 ? 'MULTI' : primaryDrop.shortName
   const name =
-    alignTitleDestination(rawTitle, destLabel) ||
+    alignTitleDestination(rawTitle, destLabel, matchFor()) ||
     `Stellar Haul | ${totalScu} SCU ${commodity} → ${destLabel}`
 
   const haulType: HaulType =
@@ -613,20 +644,28 @@ function parseBlock(block: string): Mission | null {
   if (!pickupRaw || !dropRaw) return null
 
   const ctx = createLocationResolveCtx({ nyxOnDuplicate: false })
+  const parsedHaul = parseHaulType(block)
+  const pickupName = pickupRaw.replace(/[|•·].*$/, '').trim()
+  const dropName = dropRaw.replace(/[|•·].*$/, '').trim()
   const pickup = resolveContractLocation(
-    pickupRaw.replace(/[|•·].*$/, '').trim(),
+    pickupName,
     ctx,
+    parsedHaul ? { scope: haulScopeOf(parsedHaul), anchors: [] } : undefined,
   )
+  if (!pickup) return null
   const dropoff = resolveContractLocation(
-    dropRaw.replace(/[|•·].*$/, '').trim(),
+    dropName,
     ctx,
+    parsedHaul
+      ? { scope: haulScopeOf(parsedHaul), anchors: [pickup] }
+      : undefined,
   )
-  if (pickup.id === dropoff.id) return null
+  if (!dropoff || pickup.id === dropoff.id) return null
 
   const name = `Haul ${totalScu} SCU → ${dropoff.shortName}`
   return createMission({
     name,
-    haulType: parseHaulType(block) ?? inferHaulType(1, 1, name),
+    haulType: parsedHaul ?? inferHaulType(1, 1, name),
     pickupIds: [pickup.id],
     dropoffIds: [dropoff.id],
     totalScu,
