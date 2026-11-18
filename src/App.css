@@ -1843,6 +1843,27 @@ body.modal-open {
   width: min(420px, 100%);
 }
 
+.modal.share-modal {
+  width: min(640px, 100%);
+}
+
+.share-link-field input {
+  width: 100%;
+}
+
+.rest-here-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.35rem 0 0.9rem;
+}
+
+.rest-here-options label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .commodity-picker {
   margin-bottom: 0.85rem;
   position: relative;
@@ -2313,6 +2334,13 @@ button.danger {
   margin-bottom: 0.55rem;
 }
 
+.route-steps-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
 .route-steps-label {
   flex: 1;
   display: flex;
@@ -2484,6 +2512,46 @@ button.danger {
   animation: slide-in 0.3s ease-out both;
 }
 
+.stop-group.is-done {
+  opacity: 0.55;
+}
+
+.stop-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.stop-done input {
+  margin: 0;
+}
+
+.stop-reorder {
+  display: inline-flex;
+  gap: 0.2rem;
+  flex-shrink: 0;
+}
+
+.route-follow {
+  margin: 0 0 0.85rem;
+}
+
+.route-follow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.route-follow-actions .ghost.is-active {
+  border-color: rgba(78, 207, 126, 0.55);
+  color: var(--fog);
+}
+
 .stop-group.start {
   border-color: rgba(148, 176, 196, 0.22);
 }
@@ -2491,6 +2559,7 @@ button.danger {
 .group-head {
   display: flex;
   align-items: flex-start;
+  flex-wrap: wrap;
   gap: 0.65rem;
 }
 

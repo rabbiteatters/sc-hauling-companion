@@ -149,6 +149,6 @@ export interface OptimizedRoute {
   totalCargoScu: number
   capacityScu: number
   tripCount: number
-  method: 'exact' | 'heuristic' | 'multitrip'
+  method: 'exact' | 'heuristic' | 'multitrip' | 'following'
   peakLoad: number
 }

@@ -27,6 +27,30 @@ export function groupRouteByLocation(stops: RouteStop[]): RouteLocationGroup[] {
   return groups
 }
 
+export function leadingDoneCount(done: ReadonlySet<number>): number {
+  let n = 0
+  while (done.has(n)) n++
+  return n
+}
+
+/**
+ * Stops that Calculate rest keeps: the leading done run, plus any done stop
+ * after the current step.
+ */
+export function followingDoneIndices(
+  done: ReadonlySet<number>,
+  groupCount: number,
+  currentStep: number,
+): number[] {
+  const chosen = new Set<number>()
+  const lead = leadingDoneCount(done)
+  for (let i = 0; i < lead && i < groupCount; i++) chosen.add(i)
+  for (const i of done) {
+    if (i > currentStep && i >= 0 && i < groupCount) chosen.add(i)
+  }
+  return [...chosen].sort((a, b) => a - b)
+}
+
 /** Attach box breakdowns + clearer mission labels from catalog. */
 export function enrichStopsWithBoxes(
   route: OptimizedRoute,

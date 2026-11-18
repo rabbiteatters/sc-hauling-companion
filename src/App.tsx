@@ -30,6 +30,14 @@ import {
   syncDraftFromObjectives,
   type CapacityMode,
 } from './lib/appCache'
+import {
+  buildShareUrl,
+  hashHasShare,
+  loadRouteSession,
+  readShareHash,
+  saveRouteSession,
+  type ShareSnapshot,
+} from './lib/share'
 import { buildAutoMissionName } from './lib/haulTypes'
 import {
   createEmptyObjective,
@@ -40,7 +48,8 @@ import {
   objectivesHaveErrors,
 } from './lib/objectives'
 import { parseMissionText, readMissionImage } from './lib/ocr'
-import { formatHoldCapacity, optimizeRoute } from './lib/optimizer'
+import { formatHoldCapacity, moveRouteGroup, optimizeRoute, optimizeRouteFollowing, resequenceRouteStops } from './lib/optimizer'
+import { groupRouteByLocation, leadingDoneCount, followingDoneIndices } from './lib/routeGroups'
 import {
   DEFAULT_MAX_UNIT_SCU,
   amendPickupActual,
@@ -54,6 +63,7 @@ import {
 } from './lib/spread'
 import {
   getAllLocations,
+  getCatalog,
   getLocation,
   locationLabel,
 } from './store/catalog'
@@ -61,6 +71,8 @@ import type { HaulType, Mission, OptimizedRoute } from './types'
 import './App.css'
 
 const cached = loadAppCache()
+const openingShare = hashHasShare()
+const storedRoute = openingShare ? null : loadRouteSession()
 
 function haulTypeLabel(t: HaulType): string {
   return t
@@ -435,7 +447,17 @@ export default function App() {
   const [redoStack, setRedoStack] = useState<Mission[][]>([])
   const [modalStep, setModalStep] = useState<MissionModalStep | null>(null)
   const [editingMissionId, setEditingMissionId] = useState<string | null>(null)
-  const [route, setRoute] = useState<OptimizedRoute | null>(null)
+  const [route, setRoute] = useState<OptimizedRoute | null>(storedRoute?.route ?? null)
+  const [doneGroups, setDoneGroups] = useState<Set<number>>(
+    () => new Set(storedRoute?.done ?? []),
+  )
+  const [routeRearrange, setRouteRearrange] = useState(false)
+  const [routeStep, setRouteStep] = useState(storedRoute?.step ?? 0)
+  const [shareGate, setShareGate] = useState<'wait' | 'done'>(
+    openingShare ? 'wait' : 'done',
+  )
+  const [shareNote, setShareNote] = useState('')
+  const [shareLink, setShareLink] = useState<string | null>(null)
   const [configCollapsed, setConfigCollapsed] = useState(false)
   const [missionsCollapsed, setMissionsCollapsed] = useState(false)
   const [missionsRearrangeMode, setMissionsRearrangeMode] = useState(false)
@@ -449,6 +471,11 @@ export default function App() {
   const missionListRef = useRef<HTMLUListElement>(null)
   const missionActionProbeRef = useRef<HTMLDivElement>(null)
   const [purgeConfirmOpen, setPurgeConfirmOpen] = useState(false)
+  const [restHere, setRestHere] = useState<{
+    currentStep: number
+    options: { locationId: string; name: string }[]
+    selectedId: string
+  } | null>(null)
   const [ocrBusy, setOcrBusy] = useState(false)
   const [ocrProgress, setOcrProgress] = useState(0)
   const [ocrStatus, setOcrStatus] = useState('')
@@ -468,11 +495,44 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null)
   const cacheReady = useRef(false)
   const shipInitDone = useRef(false)
+  const shareShipFallback = useRef<{ name: string; capacityScu: number } | null>(null)
   const ocrCancelRef = useRef(false)
   const lastOcrFillSig = useRef('')
   const demoIndexRef = useRef(
     cached.missions.filter((m) => m.source === 'demo').length,
   )
+
+  function clearPlannedRoute() {
+    setRoute(null)
+    setDoneGroups(new Set())
+    setRouteRearrange(false)
+    setRouteStep(0)
+    setRestHere(null)
+  }
+
+  async function copyShareLink() {
+    const ship = catalog.ships.find((s) => s.id === shipId)
+    const url = await buildShareUrl({
+      capacityMode,
+      shipId,
+      shipName: ship?.name ?? '',
+      customScu,
+      capacityScu,
+      startId,
+      missions,
+      route,
+      done: [...doneGroups],
+      step: routeStep,
+    })
+    try {
+      await navigator.clipboard.writeText(url)
+      setShareLink(null)
+      setShareNote('copied')
+    } catch {
+      setShareNote('')
+      setShareLink(url)
+    }
+  }
 
   const capacityScu = useMemo(() => {
     if (capacityMode === 'custom') return Math.max(0, customScu)
@@ -590,8 +650,11 @@ export default function App() {
     return () => ro.disconnect()
   }, [missions.length, missionsCollapsed, recomputeMissionListChrome])
 
-  // Persist all selectable choices
+  // Persist all selectable choices, plus the planned route so a shared link
+  // still matches after the hash is cleared.
   useEffect(() => {
+    if (shareGate === 'wait') return
+    saveRouteSession({ route, done: [...doneGroups], step: routeStep })
     if (!cacheReady.current) {
       // Skip the first paint so we don't overwrite cache before hydration finishes
       cacheReady.current = true
@@ -616,15 +679,118 @@ export default function App() {
     draft,
     missions,
     missionsInitialized,
+    route,
+    doneGroups,
+    routeStep,
+    shareGate,
   ])
+
+  function applyShareSnapshot(snap: ShareSnapshot) {
+    let capacityMode = snap.capacityMode
+    let shipId = snap.shipId
+    let customScu = snap.customScu
+    const ships = getCatalog().ships
+    if (capacityMode === 'ship' && ships.length && !ships.some((s) => s.id === shipId)) {
+      const named = snap.shipName
+        ? ships.find((s) => s.name === snap.shipName)
+        : undefined
+      if (named) shipId = named.id
+      else if (snap.capacityScu > 0) {
+        capacityMode = 'custom'
+        customScu = snap.capacityScu
+      }
+    }
+    shareShipFallback.current =
+      capacityMode === 'ship' && !ships.length
+        ? { name: snap.shipName, capacityScu: snap.capacityScu }
+        : null
+    setCapacityMode(capacityMode)
+    setShipId(shipId)
+    setCustomScu(customScu)
+    setStartId(snap.startId)
+    setMissions(snap.missions)
+    setMissionsInitialized(true)
+    demoIndexRef.current = snap.missions.filter((m) => m.source === 'demo').length
+    setUndoStack([])
+    setRedoStack([])
+    setRoute(snap.route)
+    setDoneGroups(new Set(snap.done))
+    setRouteRearrange(false)
+    setRouteStep(snap.step)
+    setRestHere(null)
+    saveAppCache({
+      capacityMode,
+      shipId,
+      customScu,
+      startId: snap.startId,
+      draftHaul: cached.draftHaul,
+      draft: cached.draft,
+      missions: snap.missions,
+      missionsInitialized: true,
+    })
+    saveRouteSession({ route: snap.route, done: snap.done, step: snap.step })
+  }
+
+  useEffect(() => {
+    let generation = 0
+    async function loadShareFromHash() {
+      const token = ++generation
+      const hash = location.hash
+      if (!hashHasShare(hash)) {
+        if (token === generation) setShareGate('done')
+        return
+      }
+      const snap = await readShareHash(hash)
+      if (token !== generation) return
+      if (snap) applyShareSnapshot(snap)
+      if (location.hash === hash) {
+        history.replaceState(null, '', `${location.pathname}${location.search}`)
+      }
+      setShareGate('done')
+    }
+    void loadShareFromHash()
+    window.addEventListener('hashchange', loadShareFromHash)
+    return () => {
+      generation += 1
+      window.removeEventListener('hashchange', loadShareFromHash)
+    }
+    // Apply whenever a share hash arrives, including a link opened in this tab.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (shareNote !== 'copied') return
+    const timer = window.setTimeout(() => setShareNote(''), 2000)
+    return () => window.clearTimeout(timer)
+  }, [shareNote])
 
   // Fill missing selects once catalog arrives (keep cached values when still valid)
   useEffect(() => {
-    if (!catalog.loadedAt) return
+    if (shareGate !== 'done' || !catalog.loadedAt) return
 
     const shipOk = Boolean(shipId && catalog.ships.some((s) => s.id === shipId))
     if (shipOk) {
       shipInitDone.current = true
+      shareShipFallback.current = null
+    } else if (shareShipFallback.current) {
+      const fallback = shareShipFallback.current
+      shareShipFallback.current = null
+      const named = fallback.name
+        ? catalog.ships.find((s) => s.name === fallback.name)
+        : undefined
+      if (named) {
+        setShipId(named.id)
+        shipInitDone.current = true
+      } else if (fallback.capacityScu > 0) {
+        setCapacityMode('custom')
+        setCustomScu(fallback.capacityScu)
+        shipInitDone.current = true
+      } else if (shipId || !shipInitDone.current) {
+        const c2 = catalog.ships.find((s) => /C2 Hercules/i.test(s.name))
+        const max = catalog.ships.find((s) => /Freelancer MAX/i.test(s.name))
+        setShipId(c2?.id ?? max?.id ?? catalog.ships[0]?.id ?? '')
+        shipInitDone.current = true
+      }
     } else if (shipId || !shipInitDone.current) {
       // Stale id, or first catalog load with empty selection — pick a default.
       // After init, an empty shipId means the user cleared it (0 SCU hold).
@@ -693,7 +859,7 @@ export default function App() {
       demoIndexRef.current = DEMO_MISSION_COUNT
       setMissionsInitialized(true)
     }
-  }, [catalog.loadedAt, catalog.ships, catalog.locations])
+  }, [catalog.loadedAt, catalog.ships, catalog.locations, shareGate])
 
   const runOcrFilesRef = useRef<
     (files: Array<File | Blob>, opts?: { applyToMissionId?: string | null }) => Promise<void>
@@ -734,7 +900,7 @@ export default function App() {
     setUndoStack((stack) => stack.slice(0, -1))
     setMissions(restore)
     setMissionsInitialized(true)
-    setRoute(null)
+    clearPlannedRoute()
   }
 
   function redoMissionChange() {
@@ -744,7 +910,7 @@ export default function App() {
     setRedoStack((stack) => stack.slice(0, -1))
     setMissions(restore)
     setMissionsInitialized(true)
-    setRoute(null)
+    clearPlannedRoute()
   }
 
   function fillDraftFromMission(m: Mission | null | undefined) {
@@ -918,7 +1084,7 @@ export default function App() {
       return [...prev, mission]
     })
     setMissionsInitialized(true)
-    setRoute(null)
+    clearPlannedRoute()
     setDraft((d) => {
       const cursor = [...missions, { code } as Mission]
       return {
@@ -954,6 +1120,9 @@ export default function App() {
       setRoute(
         optimizeRoute(next.filter(isMissionEnabled), startId, capacityScu),
       )
+      setDoneGroups(new Set())
+      setRouteRearrange(false)
+      setRouteStep(0)
     }
   }
 
@@ -965,7 +1134,7 @@ export default function App() {
       ),
     )
     setMissionsInitialized(true)
-    setRoute(null)
+    clearPlannedRoute()
   }
 
   function moveMission(id: string, delta: -1 | 1) {
@@ -994,7 +1163,7 @@ export default function App() {
     pushMissionUndo(missions)
     setMissions((m) => m.filter((x) => x.id !== id))
     setMissionsInitialized(true)
-    setRoute(null)
+    clearPlannedRoute()
   }
 
   function requestPurgeMissions() {
@@ -1010,7 +1179,7 @@ export default function App() {
     pushMissionUndo(missions)
     setMissions([])
     setMissionsInitialized(true)
-    setRoute(null)
+    clearPlannedRoute()
     setPurgeConfirmOpen(false)
   }
 
@@ -1044,7 +1213,7 @@ export default function App() {
     setMissionsInitialized(true)
     setEditingMissionId(null)
     setModalStep(null)
-    setRoute(null)
+    clearPlannedRoute()
   }
 
   const editingMission = editingMissionId
@@ -1054,8 +1223,105 @@ export default function App() {
   function runOptimize() {
     if (!startId) return
     setRoute(optimizeRoute(activeMissions, startId, capacityScu))
+    setDoneGroups(new Set())
+    setRouteRearrange(false)
+    setRouteStep(0)
     setConfigCollapsed(true)
     setMissionsCollapsed(true)
+  }
+
+  function toggleRouteDone(index: number) {
+    setDoneGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
+
+  function finishCalculateRest(currentStep: number, fromLocationId?: string) {
+    if (!route || !startId) return
+    const groups = groupRouteByLocation(route.stops)
+    const doneIdx = followingDoneIndices(doneGroups, groups.length, currentStep)
+    if (doneIdx.length <= 0 || doneIdx.length >= groups.length) return
+    const orderedIdx = fromLocationId
+      ? [
+          ...doneIdx.filter((i) => groups[i]?.locationId !== fromLocationId),
+          ...doneIdx.filter((i) => groups[i]?.locationId === fromLocationId),
+        ]
+      : doneIdx
+    const movedHere = orderedIdx.some((idx, i) => idx !== doneIdx[i])
+    const contiguous = !movedHere && doneIdx.every((n, i) => n === i)
+    let prefix = orderedIdx.flatMap((i) => groups[i].actions)
+    if (movedHere) prefix = prefix.map((stop) => ({ ...stop, trip: 0 }))
+    const resequenced = contiguous
+      ? null
+      : resequenceRouteStops(prefix, startId, capacityScu)
+    if (resequenced) prefix = resequenced
+    const fromId = fromLocationId ?? prefix[prefix.length - 1]?.locationId
+    if (!fromId) return
+    const next = optimizeRouteFollowing(
+      activeMissions,
+      capacityScu,
+      prefix,
+      fromId,
+      { trustCargoAfter: contiguous || resequenced != null },
+    )
+    if (!next) return
+    setRoute(next)
+    const doneCount = groupRouteByLocation(prefix).length
+    const marks = new Set<number>()
+    for (let i = 0; i < doneCount; i++) marks.add(i)
+    setDoneGroups(marks)
+    const restGroups = groupRouteByLocation(next.stops)
+    setRouteStep(Math.max(0, Math.min(doneCount - 1, restGroups.length - 1)))
+    setRestHere(null)
+  }
+
+  function calculateRest(currentStep: number) {
+    if (!route || !startId) return
+    const groups = groupRouteByLocation(route.stops)
+    const doneIdx = followingDoneIndices(doneGroups, groups.length, currentStep)
+    if (doneIdx.length <= 0 || doneIdx.length >= groups.length) return
+    const doneNotBefore = doneIdx.filter((i) => i > currentStep)
+    if (doneNotBefore.length) {
+      const options: { locationId: string; name: string }[] = []
+      const seen = new Set<string>()
+      for (const i of doneIdx) {
+        const group = groups[i]
+        if (!group || seen.has(group.locationId)) continue
+        seen.add(group.locationId)
+        options.push({ locationId: group.locationId, name: group.locationName })
+      }
+      if (!options.length) return
+      setRestHere({
+        currentStep,
+        options,
+        selectedId: options[options.length - 1].locationId,
+      })
+      return
+    }
+    finishCalculateRest(currentStep)
+  }
+
+  function moveRemainingGroup(index: number, delta: -1 | 1) {
+    if (!route || !startId) return
+    const doneCount = leadingDoneCount(doneGroups)
+    const next = moveRouteGroup(route, startId, doneCount, index, delta)
+    if (!next) return
+    setRoute(next)
+    setDoneGroups((prev) => {
+      const marks = new Set<number>()
+      const a = index
+      const b = index + delta
+      for (const i of prev) {
+        if (i < doneCount) marks.add(i)
+        else if (i === a) marks.add(b)
+        else if (i === b) marks.add(a)
+        else marks.add(i)
+      }
+      return marks
+    })
   }
 
   function resetOcrFileInput() {
@@ -1402,7 +1668,7 @@ export default function App() {
     if (!list.length) return
     setMissions((prev) => [...prev, ...list])
     setMissionsInitialized(true)
-    setRoute(null)
+    clearPlannedRoute()
   }
 
   function addOcrAll() {
@@ -1430,6 +1696,16 @@ export default function App() {
       : null
 
   const typeLabel = haulTypeLabel
+
+  if (shareGate === 'wait') {
+    return (
+      <div className="app boot">
+        <div className="atmosphere" aria-hidden />
+        <p className="brand">SC Hauling Companion</p>
+        <p className="hint">Opening shared run…</p>
+      </div>
+    )
+  }
 
   if (catalog.loading && !catalog.loadedAt) {
     return (
@@ -1468,6 +1744,15 @@ export default function App() {
         <div className="topbar-actions">
           <button type="button" className="ghost" onClick={() => void catalog.reload()}>
             Refresh data
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            disabled={!missions.length}
+            title="Copy a link to these missions, the ship, and the current route"
+            onClick={() => void copyShareLink()}
+          >
+            {shareNote === 'copied' ? 'Link copied' : 'Share'}
           </button>
         <button
           type="button"
@@ -1906,6 +2191,14 @@ export default function App() {
               missions={missions}
               startId={startId}
               capacityScu={capacityScu}
+              doneGroups={doneGroups}
+              rearrange={routeRearrange}
+              step={routeStep}
+              onStepChange={setRouteStep}
+              onToggleDone={toggleRouteDone}
+              onCalculateRest={calculateRest}
+              onToggleRearrange={() => setRouteRearrange((v) => !v)}
+              onMoveGroup={moveRemainingGroup}
               onAmendPickup={amendPickup}
             />
           )}
@@ -1920,6 +2213,44 @@ export default function App() {
         ; locations from UEX terminals + scunpacked coords (via SuperCargo data). Mission
         titles use in-game haul rank/type patterns. Unofficial community tool.
       </footer>
+
+      {shareLink && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => setShareLink(null)}
+        >
+          <div
+            className="modal panel confirm-modal share-modal"
+            role="dialog"
+            aria-labelledby="share-title"
+            aria-describedby="share-desc"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="panel-head">
+              <h2 id="share-title">Share link</h2>
+            </div>
+            <p id="share-desc" className="hint">
+              This link opens the same missions, ship, start, and route, including
+              stops already marked done.
+            </p>
+            <label className="field share-link-field">
+              <span>Link</span>
+              <input
+                readOnly
+                value={shareLink}
+                autoFocus
+                onFocus={(e) => e.currentTarget.select()}
+              />
+            </label>
+            <div className="modal-actions">
+              <button type="button" className="primary" onClick={() => setShareLink(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {purgeConfirmOpen && (
         <div
@@ -1947,6 +2278,60 @@ export default function App() {
               </button>
               <button type="button" className="primary danger" onClick={confirmPurgeMissions}>
                 Purge all
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {restHere && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => setRestHere(null)}
+        >
+          <div
+            className="modal panel confirm-modal"
+            role="dialog"
+            aria-labelledby="rest-here-title"
+            aria-describedby="rest-here-desc"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="panel-head">
+              <h2 id="rest-here-title">Where are you now?</h2>
+            </div>
+            <p id="rest-here-desc" className="hint">
+              A done stop is not before the current step. Pick the done location you
+              are at. The rest of the route starts there.
+            </p>
+            <div className="rest-here-options">
+              {restHere.options.map((option) => (
+                <label key={option.locationId}>
+                  <input
+                    type="radio"
+                    name="rest-here"
+                    value={option.locationId}
+                    checked={restHere.selectedId === option.locationId}
+                    onChange={() =>
+                      setRestHere((prev) =>
+                        prev ? { ...prev, selectedId: option.locationId } : prev,
+                      )
+                    }
+                  />
+                  <span>{option.name}</span>
+                </label>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="ghost" onClick={() => setRestHere(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => finishCalculateRest(restHere.currentStep, restHere.selectedId)}
+              >
+                Calculate rest
               </button>
             </div>
           </div>

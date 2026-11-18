@@ -277,6 +277,11 @@ function sanitizeDraft(raw: unknown): DraftCache {
   })
 }
 
+export function coerceMissions(raw: unknown): Mission[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map(sanitizeMission).filter((m): m is Mission => m != null)
+}
+
 export function loadAppCache(): AppCache {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -286,9 +291,7 @@ export function loadAppCache(): AppCache {
         draft: { ...DEFAULT_DRAFT, objectives: [defaultDraftObjective()] },
       }
     const parsed = JSON.parse(raw) as Partial<AppCache>
-    const missions = Array.isArray(parsed.missions)
-      ? parsed.missions.map(sanitizeMission).filter((m): m is Mission => m != null)
-      : []
+    const missions = coerceMissions(parsed.missions)
     // Legacy caches without the flag: treat non-empty as initialized; empty as not
     // (so first visit still gets demos). Explicit false/true from newer saves wins.
     const missionsInitialized =

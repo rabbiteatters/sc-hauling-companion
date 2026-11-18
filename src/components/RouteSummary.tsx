@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { formatAuec, formatDistance, formatHoldCapacity } from '../lib/optimizer'
-import { enrichStopsWithBoxes, groupRouteByLocation } from '../lib/routeGroups'
+import { enrichStopsWithBoxes, followingDoneIndices, groupRouteByLocation, leadingDoneCount } from '../lib/routeGroups'
 import {
   allowedCrateSizes,
   countsToScu,
@@ -15,6 +15,14 @@ interface Props {
   missions: Mission[]
   startId: string
   capacityScu: number
+  doneGroups: ReadonlySet<number>
+  rearrange: boolean
+  step: number
+  onStepChange: (step: number) => void
+  onToggleDone: (index: number) => void
+  onCalculateRest: (currentStep: number) => void
+  onToggleRearrange: () => void
+  onMoveGroup: (index: number, delta: -1 | 1) => void
   onAmendPickup: (missionId: string, locationId: string, actualScu: number) => void
 }
 
@@ -23,15 +31,18 @@ export function RouteSummary({
   missions,
   startId,
   capacityScu,
+  doneGroups,
+  rearrange,
+  step,
+  onStepChange,
+  onToggleDone,
+  onCalculateRest,
+  onToggleRearrange,
+  onMoveGroup,
   onAmendPickup,
 }: Props) {
   const enriched = enrichStopsWithBoxes(route, missions)
   const groups = groupRouteByLocation(enriched.stops)
-  const [step, setStep] = useState(0)
-
-  useEffect(() => {
-    setStep(0)
-  }, [route.totalDistance, route.stops.length, startId])
 
   const maxStep = Math.max(0, groups.length - 1)
   const safeStep = Math.min(step, maxStep)
@@ -74,6 +85,11 @@ export function RouteSummary({
     }
   }, [current, groups, safeStep])
 
+  const doneCount = leadingDoneCount(doneGroups)
+  const followingDone = followingDoneIndices(doneGroups, groups.length, safeStep)
+  const canCalculateRest =
+    followingDone.length > 0 && followingDone.length < groups.length
+
   return (
     <>
       <div className="route-steps">
@@ -82,7 +98,7 @@ export function RouteSummary({
             type="button"
             className="ghost"
             disabled={safeStep <= 0}
-            onClick={() => setStep((s) => Math.max(0, s - 1))}
+            onClick={() => onStepChange(Math.max(0, safeStep - 1))}
           >
             Prev
           </button>
@@ -93,14 +109,28 @@ export function RouteSummary({
             </span>
             {current && <ElevatorNote locationId={current.locationId} />}
           </div>
-          <button
-            type="button"
-            className="ghost"
-            disabled={safeStep >= maxStep}
-            onClick={() => setStep((s) => Math.min(maxStep, s + 1))}
-          >
-            Next
-          </button>
+          <div className="route-steps-actions">
+            <button
+              type="button"
+              className="ghost"
+              disabled={!current || (doneGroups.has(safeStep) && safeStep >= maxStep)}
+              title="Mark this stop done and go to the next"
+              onClick={() => {
+                if (current && !doneGroups.has(safeStep)) onToggleDone(safeStep)
+                if (safeStep < maxStep) onStepChange(safeStep + 1)
+              }}
+            >
+              Done
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              disabled={safeStep >= maxStep}
+              onClick={() => onStepChange(Math.min(maxStep, safeStep + 1))}
+            >
+              Next
+            </button>
+          </div>
         </div>
 
         <div className="route-steps-grid">
@@ -234,6 +264,33 @@ export function RouteSummary({
         </div>
       </div>
 
+      <div className="route-follow">
+        <p className="hint">
+          Mark stops done from the top, or any stop after the current step.
+          Done on the step bar marks this stop and moves on. Calculate rest
+          keeps that cargo aboard and replans only what is left.
+        </p>
+        <div className="route-follow-actions">
+          <button
+            type="button"
+            className="primary"
+            disabled={!canCalculateRest}
+            onClick={() => onCalculateRest(safeStep)}
+          >
+            Calculate rest
+          </button>
+          <button
+            type="button"
+            className={`ghost${rearrange ? ' is-active' : ''}`}
+            disabled={groups.length - doneCount < 2}
+            onClick={onToggleRearrange}
+            aria-pressed={rearrange}
+          >
+            {rearrange ? 'Done rearranging' : 'Rearrange rest'}
+          </button>
+        </div>
+      </div>
+
       <ol className="stop-list grouped">
         <li className="stop-group start">
           <div className="group-head">
@@ -250,7 +307,13 @@ export function RouteSummary({
           <li
             key={`${g.locationId}-${g.trip}-${gi}`}
             className={
-              gi === safeStep ? 'stop-group current-step' : 'stop-group'
+              [
+                'stop-group',
+                gi === safeStep ? 'current-step' : '',
+                doneGroups.has(gi) ? 'is-done' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')
             }
           >
             <div className="group-head">
@@ -269,6 +332,43 @@ export function RouteSummary({
                   {g.actions.length} action{g.actions.length === 1 ? '' : 's'}
                 </p>
               </div>
+              <label className="stop-done" title="Mark this stop done">
+                <input
+                  type="checkbox"
+                  checked={doneGroups.has(gi)}
+                  onChange={() => onToggleDone(gi)}
+                  aria-label={`Mark ${g.locationName} done`}
+                />
+                <span>Done</span>
+              </label>
+              {rearrange && gi >= doneCount && (
+                <div className="stop-reorder">
+                  <button
+                    type="button"
+                    className="ghost icon-btn"
+                    disabled={gi <= doneCount}
+                    onClick={() => onMoveGroup(gi, -1)}
+                    title="Move up"
+                    aria-label={`Move ${g.locationName} up`}
+                  >
+                    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                      <path fill="currentColor" d="M7 14l5-5 5 5H7z" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost icon-btn"
+                    disabled={gi >= groups.length - 1}
+                    onClick={() => onMoveGroup(gi, 1)}
+                    title="Move down"
+                    aria-label={`Move ${g.locationName} down`}
+                  >
+                    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                      <path fill="currentColor" d="M7 10l5 5 5-5H7z" />
+                    </svg>
+                  </button>
+                </div>
+              )}
               <ElevatorNote locationId={g.locationId} />
             </div>
 

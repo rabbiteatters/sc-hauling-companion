@@ -5,8 +5,16 @@
  */
 
 import { legacyMissionToObjectives, missionTotalScu } from './objectives'
+import { buildDropoffs, buildStops, DEFAULT_MAX_UNIT_SCU } from './spread'
+import { groupRouteByLocation } from './routeGroups'
 import { distanceBetween, getLocation } from '../store/catalog'
-import type { Mission, MissionObjective, OptimizedRoute, RouteStop } from '../types'
+import type {
+  Mission,
+  MissionObjective,
+  MissionStop,
+  OptimizedRoute,
+  RouteStop,
+} from '../types'
 
 interface CargoJob {
   id: string
@@ -16,6 +24,13 @@ interface CargoJob {
   dropoffId: string
   scu: number
   commodity?: string
+}
+
+/** Cargo already aboard when planning only the rest of a route. */
+interface RouteSeed {
+  /** Hold that is not represented by a remaining delivery job. */
+  loadOffset: number
+  preloadedIds: ReadonlySet<string>
 }
 
 const EXACT_NODE_MAX = 14
@@ -101,6 +116,41 @@ function isFeasible(m: Mission, capacity: number): boolean {
   )
 }
 
+/**
+ * Multi-stop sides often keep per-stop SCU at 0 until the user spreads Total.
+ * For routing, fill missing side loads from Total (or the other side's sum).
+ */
+function workingObjectiveStops(
+  m: Mission,
+  obj: MissionObjective,
+): {
+  pickups: MissionStop[]
+  dropoffs: MissionStop[]
+} {
+  const pickSum = obj.pickups.reduce((s, p) => s + Math.max(0, p.scu), 0)
+  const dropSum = obj.dropoffs.reduce((s, d) => s + Math.max(0, d.scu), 0)
+  const total = Math.max(0, Math.round(obj.totalScu) || 0, pickSum, dropSum)
+  const maxUnit = m.maxUnitScu || DEFAULT_MAX_UNIT_SCU
+
+  let pickups = obj.pickups
+  let dropoffs = obj.dropoffs
+  if (obj.pickups.length && pickSum <= 0 && total > 0) {
+    pickups = buildStops(
+      obj.pickups.map((p) => p.locationId),
+      total,
+      maxUnit,
+    )
+  }
+  if (obj.dropoffs.length && dropSum <= 0 && total > 0) {
+    dropoffs = buildDropoffs(
+      obj.dropoffs.map((d) => d.locationId),
+      total,
+      maxUnit,
+    )
+  }
+  return { pickups, dropoffs }
+}
+
 function expandObjectiveJobs(
   m: Mission,
   obj: MissionObjective,
@@ -109,13 +159,14 @@ function expandObjectiveJobs(
   const jobs: CargoJob[] = []
   const commodity = obj.commodity.trim() || m.commodity
   const prefix = `${m.id}:o${objIndex}`
+  const { pickups, dropoffs } = workingObjectiveStops(m, obj)
 
-  if (obj.pickups.length > 1 && obj.dropoffs.length > 1) {
-    const dropTotal = obj.dropoffs.reduce((s, d) => s + Math.max(0, d.scu), 0)
-    for (const p of obj.pickups) {
+  if (pickups.length > 1 && dropoffs.length > 1) {
+    const dropTotal = dropoffs.reduce((s, d) => s + Math.max(0, d.scu), 0)
+    for (const p of pickups) {
       if (p.scu <= 0) continue
       if (dropTotal <= 0) {
-        const dest = obj.dropoffs[0]
+        const dest = dropoffs[0]
         jobs.push({
           id: `${prefix}:${p.locationId}->${dest.locationId}`,
           missionId: m.id,
@@ -128,11 +179,14 @@ function expandObjectiveJobs(
         continue
       }
       let assigned = 0
-      obj.dropoffs.forEach((d, di) => {
-        const isLast = di === obj.dropoffs.length - 1
+      dropoffs.forEach((d, di) => {
+        const isLast = di === dropoffs.length - 1
         const share = isLast
-          ? p.scu - assigned
-          : Math.round((p.scu * Math.max(0, d.scu)) / dropTotal)
+          ? Math.max(0, p.scu - assigned)
+          : Math.max(
+              0,
+              Math.round((p.scu * Math.max(0, d.scu)) / dropTotal),
+            )
         assigned += share
         if (share <= 0) return
         jobs.push({
@@ -146,9 +200,9 @@ function expandObjectiveJobs(
         })
       })
     }
-  } else if (obj.pickups.length >= 1 && obj.dropoffs.length === 1) {
-    const dest = obj.dropoffs[0].locationId
-    for (const p of obj.pickups) {
+  } else if (pickups.length >= 1 && dropoffs.length === 1) {
+    const dest = dropoffs[0].locationId
+    for (const p of pickups) {
       if (p.scu <= 0) continue
       jobs.push({
         id: `${prefix}:${p.locationId}->${dest}`,
@@ -160,9 +214,9 @@ function expandObjectiveJobs(
         commodity,
       })
     }
-  } else if (obj.pickups.length === 1 && obj.dropoffs.length >= 1) {
-    const src = obj.pickups[0].locationId
-    for (const d of obj.dropoffs) {
+  } else if (pickups.length === 1 && dropoffs.length >= 1) {
+    const src = pickups[0].locationId
+    for (const d of dropoffs) {
       if (d.scu <= 0) continue
       jobs.push({
         id: `${prefix}:${src}->${d.locationId}`,
@@ -193,6 +247,7 @@ function planJobs(
   jobs: CargoJob[],
   startId: string,
   capacity: number,
+  seed?: RouteSeed,
 ): {
   stops: RouteStop[]
   totalDistance: number
@@ -200,20 +255,37 @@ function planJobs(
   method: OptimizedRoute['method']
   peakLoad: number
 } | null {
-  const total = jobs.reduce((s, j) => s + j.scu, 0)
-  // Unlimited hold (Infinity) or cargo fits → one tour.
-  if (!Number.isFinite(capacity) || total <= capacity) {
-    const single = solveSingleTour(jobs, startId, capacity)
+  if (!seed) {
+    const total = jobs.reduce((s, j) => s + j.scu, 0)
+    // Unlimited hold (Infinity) or cargo fits → one tour.
+    if (!Number.isFinite(capacity) || total <= capacity) {
+      const single = solveSingleTour(jobs, startId, capacity)
+      if (!single) return null
+      return { ...single, tripCount: 1 }
+    }
+    return solveMultiTrip(jobs, startId, capacity)
+  }
+
+  const aboardScu = jobs
+    .filter((j) => seed.preloadedIds.has(j.id))
+    .reduce((s, j) => s + j.scu, 0)
+  const openScu = jobs
+    .filter((j) => !seed.preloadedIds.has(j.id))
+    .reduce((s, j) => s + j.scu, 0)
+  const carried = openScu + aboardScu + seed.loadOffset
+  if (!Number.isFinite(capacity) || carried <= capacity) {
+    const single = solveSingleTour(jobs, startId, capacity, seed)
     if (!single) return null
     return { ...single, tripCount: 1 }
   }
-  return solveMultiTrip(jobs, startId, capacity)
+  return solveMultiTrip(jobs, startId, capacity, seed)
 }
 
 function solveSingleTour(
   jobs: CargoJob[],
   startId: string,
   capacity: number,
+  seed?: RouteSeed,
 ): {
   stops: RouteStop[]
   totalDistance: number
@@ -222,10 +294,11 @@ function solveSingleTour(
 } | null {
   // Depot is always node 0 (even when start == a pickup/dropoff). Cargo stops are
   // separate nodes so we can leave and return to unload at the starting location.
-  const { nodes, mapped, start } = buildTourGraph(jobs, startId)
+  const loadOffset = seed?.loadOffset ?? 0
+  const { nodes, mapped, start } = buildTourGraph(jobs, startId, seed?.preloadedIds)
   const dist = buildDistMatrix(nodes)
   const n = nodes.length
-  const input = { n, dist, capacity, start, jobs: mapped }
+  const input = { n, dist, capacity, start, jobs: mapped, loadOffset }
 
   let order: number[] | null = null
   let method: 'exact' | 'heuristic' = 'heuristic'
@@ -242,7 +315,10 @@ function solveSingleTour(
   }
   if (!order) return null
 
-  const material = materialize(order, nodes, mapped, 0)
+  const aboardScu = mapped
+    .filter((j) => j.preloaded)
+    .reduce((s, j) => s + j.scu, 0)
+  const material = materialize(order, nodes, mapped, 0, loadOffset + aboardScu)
   return {
     stops: material.stops,
     totalDistance: material.totalDistance,
@@ -255,6 +331,7 @@ function solveMultiTrip(
   jobs: CargoJob[],
   startId: string,
   capacity: number,
+  seed?: RouteSeed,
 ): {
   stops: RouteStop[]
   totalDistance: number
@@ -269,18 +346,47 @@ function solveMultiTrip(
   let trip = 0
   let peak = 0
   let guard = 0
+  const loadOffset = seed?.loadOffset ?? 0
+  let preloadedIds = new Set(seed?.preloadedIds ?? [])
 
   while (pending.size && guard++ < 200) {
     const remaining = [...pending].map((id) => byId.get(id)!)
-    const batch = packTrip(current, remaining, capacity)
-    if (!batch.length) {
-      // Force-include smallest remaining job even if over size (should be rare)
-      const smallest = remaining.sort((a, b) => a.scu - b.scu)[0]
-      if (!smallest) break
-      batch.push(smallest)
+    let batch: CargoJob[]
+    if (preloadedIds.size) {
+      const must = remaining.filter((j) => preloadedIds.has(j.id))
+      const open = remaining.filter((j) => !preloadedIds.has(j.id))
+      const aboardScu = must.reduce((s, j) => s + j.scu, 0)
+      const room = Number.isFinite(capacity)
+        ? Math.max(0, capacity - loadOffset - aboardScu)
+        : Number.POSITIVE_INFINITY
+      batch = [...must, ...packTrip(current, open, room)]
+      if (!batch.length) break
+    } else {
+      const room =
+        seed && Number.isFinite(capacity)
+          ? Math.max(0, capacity - loadOffset)
+          : capacity
+      batch = packTrip(current, remaining, room)
+      if (!batch.length) {
+        // Force-include smallest remaining job even if over size (should be rare)
+        const smallest = remaining.sort((a, b) => a.scu - b.scu)[0]
+        if (!smallest || seed) break
+        batch.push(smallest)
+      }
     }
 
-    const tour = solveSingleTour(batch, current, Math.max(capacity, batch.reduce((s, j) => s + j.scu, 0)))
+    const tourCap = seed
+      ? capacity
+      : Math.max(
+          capacity,
+          batch.reduce((s, j) => s + j.scu, 0),
+        )
+    const tour = solveSingleTour(
+      batch,
+      current,
+      tourCap,
+      seed ? { loadOffset, preloadedIds } : undefined,
+    )
     if (!tour) return null
 
     for (const s of tour.stops) allStops.push({ ...s, trip })
@@ -288,6 +394,7 @@ function solveMultiTrip(
     for (const j of batch) pending.delete(j.id)
     current = tour.stops[tour.stops.length - 1]?.locationId ?? current
     trip += 1
+    preloadedIds = new Set()
   }
 
   if (pending.size) return null
@@ -333,11 +440,14 @@ function packTrip(fromId: string, jobs: CargoJob[], capacity: number): CargoJob[
 function buildTourGraph(
   jobs: CargoJob[],
   startId: string,
+  preloadedIds?: ReadonlySet<string>,
 ): { nodes: string[]; mapped: JobMap[]; start: number } {
+  const preloaded = preloadedIds ?? new Set<string>()
   const cargoLocs: string[] = []
   const seen = new Set<string>()
   for (const j of jobs) {
-    for (const id of [j.pickupId, j.dropoffId]) {
+    const ids = preloaded.has(j.id) ? [j.dropoffId] : [j.pickupId, j.dropoffId]
+    for (const id of ids) {
       if (seen.has(id)) continue
       seen.add(id)
       cargoLocs.push(id)
@@ -348,8 +458,9 @@ function buildTourGraph(
   const stopIndex = new Map(cargoLocs.map((id, i) => [id, i + 1]))
   const mapped: JobMap[] = jobs.map((j) => ({
     ...j,
-    pickup: stopIndex.get(j.pickupId)!,
+    pickup: preloaded.has(j.id) ? 0 : stopIndex.get(j.pickupId)!,
     dest: stopIndex.get(j.dropoffId)!,
+    preloaded: preloaded.has(j.id),
   }))
   return { nodes, mapped, start: 0 }
 }
@@ -368,12 +479,12 @@ function buildDistMatrix(nodes: string[]): number[][] {
   return dist
 }
 
-type JobMap = CargoJob & { pickup: number; dest: number }
+type JobMap = CargoJob & { pickup: number; dest: number; preloaded?: boolean }
 
-function loadForMask(mask: number, jobs: JobMap[]): number {
-  let load = 0
+function loadForMask(mask: number, jobs: JobMap[], loadOffset = 0): number {
+  let load = loadOffset
   for (const j of jobs) {
-    const got = (mask >> j.pickup) & 1
+    const got = j.preloaded || ((mask >> j.pickup) & 1)
     const gone = (mask >> j.dest) & 1
     if (got && !gone) load += j.scu
   }
@@ -383,7 +494,7 @@ function loadForMask(mask: number, jobs: JobMap[]): number {
 function canVisit(mask: number, v: number, jobs: JobMap[]): boolean {
   if ((mask >> v) & 1) return false
   for (const j of jobs) {
-    if (j.dest === v && !((mask >> j.pickup) & 1)) return false
+    if (j.dest === v && !j.preloaded && !((mask >> j.pickup) & 1)) return false
   }
   return true
 }
@@ -403,8 +514,10 @@ function solveExact(input: {
   capacity: number
   start: number
   jobs: JobMap[]
+  loadOffset?: number
 }): number[] | null | 'too-big' {
   const { n, dist, capacity, start, jobs } = input
+  const loadOffset = input.loadOffset ?? 0
   if (n > EXACT_NODE_MAX) return 'too-big'
   const full = (1 << n) - 1
   const cap = capacity > 0 ? capacity : Infinity
@@ -427,7 +540,7 @@ function solveExact(input: {
   }
 
   const m0 = 1 << start
-  if (canVisit(0, start, jobs) && loadForMask(m0, jobs) <= cap) {
+  if (canVisit(0, start, jobs) && loadForMask(m0, jobs, loadOffset) <= cap) {
     ensure(m0).cost[start] = 0
     push(m0)
   }
@@ -443,7 +556,7 @@ function solveExact(input: {
           if (mask & (1 << v)) continue
           if (!canVisit(mask, v, jobs)) continue
           const nmask = mask | (1 << v)
-          if (loadForMask(nmask, jobs) > cap) continue
+          if (loadForMask(nmask, jobs, loadOffset) > cap) continue
           if (++work > EXACT_WORK_BUDGET) return 'too-big'
           const ne = ensure(nmask)
           const cost = base + dist[last][v]
@@ -488,10 +601,26 @@ function solveHeuristic(input: {
   capacity: number
   start: number
   jobs: JobMap[]
+  loadOffset?: number
 }): number[] | null {
-  const seed = greedyFrom(input.start, input.n, input.dist, input.capacity, input.jobs)
+  const loadOffset = input.loadOffset ?? 0
+  const seed = greedyFrom(
+    input.start,
+    input.n,
+    input.dist,
+    input.capacity,
+    input.jobs,
+    loadOffset,
+  )
   if (!seed) return null
-  return localSearch(seed, input.dist, input.capacity, input.start, input.jobs)
+  return localSearch(
+    seed,
+    input.dist,
+    input.capacity,
+    input.start,
+    input.jobs,
+    loadOffset,
+  )
 }
 
 function greedyFrom(
@@ -500,6 +629,7 @@ function greedyFrom(
   dist: number[][],
   cap: number,
   jobs: JobMap[],
+  loadOffset = 0,
 ): number[] | null {
   const order = [start]
   let mask = 1 << start
@@ -510,7 +640,7 @@ function greedyFrom(
     for (let v = 0; v < n; v++) {
       if (mask & (1 << v)) continue
       if (!canVisit(mask, v, jobs)) continue
-      if (loadForMask(mask | (1 << v), jobs) > cap) continue
+      if (loadForMask(mask | (1 << v), jobs, loadOffset) > cap) continue
       if (dist[last][v] < bestD) {
         bestD = dist[last][v]
         next = v
@@ -523,12 +653,17 @@ function greedyFrom(
   return order
 }
 
-function orderFeasible(order: number[], jobs: JobMap[], cap: number): boolean {
+function orderFeasible(
+  order: number[],
+  jobs: JobMap[],
+  cap: number,
+  loadOffset = 0,
+): boolean {
   let mask = 0
   for (const v of order) {
     if (!canVisit(mask, v, jobs)) return false
     mask |= 1 << v
-    if (loadForMask(mask, jobs) > cap) return false
+    if (loadForMask(mask, jobs, loadOffset) > cap) return false
   }
   return true
 }
@@ -545,6 +680,7 @@ function localSearch(
   cap: number,
   start: number,
   jobs: JobMap[],
+  loadOffset = 0,
 ): number[] {
   let best = seed.slice()
   let bestD = orderDistance(best, dist)
@@ -555,7 +691,7 @@ function localSearch(
       for (let j = i + 1; j < best.length; j++) {
         const cand = best.slice(0, i).concat(best.slice(i, j + 1).reverse(), best.slice(j + 1))
         if (cand[0] !== start) continue
-        if (!orderFeasible(cand, jobs, cap)) continue
+        if (!orderFeasible(cand, jobs, cap, loadOffset)) continue
         const d = orderDistance(cand, dist)
         if (d < bestD - 1e-9) {
           best = cand
@@ -573,11 +709,12 @@ function materialize(
   nodes: string[],
   jobs: JobMap[],
   trip: number,
+  initialLoad = 0,
 ): { stops: RouteStop[]; totalDistance: number; peakLoad: number } {
   const stops: RouteStop[] = []
-  const aboard = new Set<string>()
-  let load = 0
-  let peak = 0
+  const aboard = new Set(jobs.filter((j) => j.preloaded).map((j) => j.id))
+  let load = initialLoad
+  let peak = initialLoad
   let prevLoc = nodes[order[0]]
 
   function pushActions(
@@ -696,6 +833,248 @@ function groupJobsByMission(jobs: JobMap[]): JobMap[][] {
     map.set(key, list)
   }
   return [...map.values()]
+}
+
+interface JobLedger {
+  job: CargoJob
+  picked: number
+  dropped: number
+}
+
+function commodityMatches(job: CargoJob, action: RouteStop): boolean {
+  if (!action.commodity || !job.commodity) return true
+  return action.commodity === job.commodity
+}
+
+/** Apply done-stop actions onto jobs so the rest plan keeps aboard cargo. */
+function consumeDoneStops(
+  jobs: CargoJob[],
+  prefix: RouteStop[],
+  trustCargoAfter = true,
+): { open: CargoJob[]; aboard: CargoJob[]; holdScu: number } {
+  const ledger: JobLedger[] = jobs.map((job) => ({ job, picked: 0, dropped: 0 }))
+  let matchedHold = 0
+  for (const action of prefix) {
+    let left = Math.abs(action.cargoDelta)
+    if (left <= 0) continue
+    const rows = ledger.filter((row) => {
+      if (row.job.missionId !== action.missionId) return false
+      if (!commodityMatches(row.job, action)) return false
+      if (action.kind === 'pickup') {
+        return row.job.pickupId === action.locationId && row.picked < row.job.scu
+      }
+      return row.job.dropoffId === action.locationId && row.dropped < row.job.scu
+    })
+    if (action.kind === 'dropoff') {
+      rows.sort((a, b) => b.picked - b.dropped - (a.picked - a.dropped))
+    }
+    for (const row of rows) {
+      if (left <= 0) break
+      if (action.kind === 'pickup') {
+        const n = Math.min(left, row.job.scu - row.picked)
+        row.picked += n
+        matchedHold += n
+        left -= n
+      } else {
+        const n = Math.min(left, row.job.scu - row.dropped)
+        const already = row.picked - row.dropped
+        if (already < n) {
+          const extra = n - already
+          row.picked += extra
+          matchedHold += extra
+        }
+        row.dropped += n
+        matchedHold -= n
+        left -= n
+      }
+    }
+  }
+
+  const open: CargoJob[] = []
+  const aboard: CargoJob[] = []
+  for (const row of ledger) {
+    const aboardScu = row.picked - row.dropped
+    const unpicked = row.job.scu - row.picked
+    if (aboardScu > 0) {
+      aboard.push({ ...row.job, id: `${row.job.id}#aboard`, scu: aboardScu })
+    }
+    if (unpicked > 0) {
+      open.push({ ...row.job, id: `${row.job.id}#open`, scu: unpicked })
+    }
+  }
+  const actionHold = prefix.length
+    ? Math.max(0, prefix[prefix.length - 1].cargoAfter)
+    : 0
+  const holdScu = trustCargoAfter ? actionHold : Math.max(0, matchedHold)
+  return { open, aboard, holdScu }
+}
+
+/**
+ * Keep done stops as-is and re-optimize only unfinished cargo.
+ * Aboard loads from those stops stay on the ship and must still be delivered.
+ */
+export function optimizeRouteFollowing(
+  missions: Mission[],
+  capacityScu: number,
+  prefixStops: RouteStop[],
+  fromLocationId: string,
+  options?: { trustCargoAfter?: boolean },
+): OptimizedRoute | null {
+  if (!prefixStops.length || !getLocation(fromLocationId)) return null
+  const reportedCapacity = Math.max(0, capacityScu)
+  const hold = resolveHoldCapacity(reportedCapacity)
+  const workable = missions.filter((m) => isFeasible(m, hold))
+  const jobs = expandJobs(workable.length ? workable : missions)
+  if (!jobs.length) return null
+
+  const { open, aboard, holdScu } = consumeDoneStops(
+    jobs,
+    prefixStops,
+    options?.trustCargoAfter !== false,
+  )
+  const remaining = [...aboard, ...open]
+  if (!remaining.length) return null
+
+  const aboardScu = aboard.reduce((s, j) => s + j.scu, 0)
+  const loadOffset = Math.max(0, holdScu - aboardScu)
+  const preloadedIds = new Set(aboard.map((j) => j.id))
+  const planned = planJobs(remaining, fromLocationId, hold, {
+    loadOffset,
+    preloadedIds,
+  })
+  if (!planned) return null
+
+  const tripBase = (prefixStops[prefixStops.length - 1]?.trip ?? -1) + 1
+  const suffix = planned.stops.map((s) => ({ ...s, trip: tripBase + s.trip }))
+  const stops = [...prefixStops, ...suffix]
+  const prefixPeak = prefixStops.reduce((m, s) => Math.max(m, s.cargoAfter), 0)
+  const reward = missions.reduce((s, m) => {
+    const total = missionCargoTotal(m)
+    return s + (m.rewardAuec ?? total * 1000)
+  }, 0)
+  const cargo = missions.reduce((s, m) => s + missionCargoTotal(m), 0)
+
+  return {
+    selectedMissionIds: missions.map((m) => m.id),
+    skippedMissionIds: [],
+    stops,
+    totalDistance: stops.reduce((s, x) => s + x.legDistance, 0),
+    totalReward: reward,
+    totalCargoScu: cargo,
+    capacityScu: reportedCapacity,
+    tripCount: planned.tripCount,
+    method: 'following',
+    peakLoad: Math.max(prefixPeak, planned.peakLoad),
+  }
+}
+
+function cargoKey(stop: RouteStop): string {
+  return `${stop.missionId}|${stop.commodity ?? ''}`
+}
+
+/** Running pickup pool after these actions. Null when a drop happens too early. */
+function poolAfter(stops: RouteStop[]): Map<string, number> | null {
+  const pool = new Map<string, number>()
+  for (const s of stops) {
+    const key = cargoKey(s)
+    const scu = Math.abs(s.cargoDelta)
+    if (s.kind === 'dropoff') {
+      const have = pool.get(key) ?? 0
+      if (have < scu) return null
+      pool.set(key, have - scu)
+    } else {
+      pool.set(key, (pool.get(key) ?? 0) + scu)
+    }
+  }
+  return pool
+}
+
+function resequenceSuffix(
+  stops: RouteStop[],
+  prevLocationId: string,
+  load: number,
+  capacityScu: number,
+  pool: Map<string, number>,
+): RouteStop[] | null {
+  const out: RouteStop[] = []
+  let prev = prevLocationId
+  for (const s of stops) {
+    const key = cargoKey(s)
+    const scu = Math.abs(s.cargoDelta)
+    if (s.kind === 'dropoff') {
+      const have = pool.get(key) ?? 0
+      if (have < scu) return null
+      pool.set(key, have - scu)
+    }
+    let leg = 0
+    if (s.locationId !== prev) {
+      const a = getLocation(prev)
+      const b = getLocation(s.locationId)
+      leg = a && b ? distanceBetween(a, b) : 0
+      prev = s.locationId
+    }
+    load += s.cargoDelta
+    if (load < -1e-6) return null
+    if (capacityScu > 0 && load > capacityScu + 1e-6) return null
+    if (s.kind === 'pickup') pool.set(key, (pool.get(key) ?? 0) + scu)
+    out.push({ ...s, legDistance: leg, cargoAfter: load })
+  }
+  return out
+}
+
+/** Replay stop actions from a start so hold and legs match only those stops. */
+export function resequenceRouteStops(
+  stops: RouteStop[],
+  startLocationId: string,
+  capacityScu: number,
+): RouteStop[] | null {
+  return resequenceSuffix(stops, startLocationId, 0, capacityScu, new Map())
+}
+
+/** Move one unfinished location visit. Done prefix stops are left unchanged. */
+export function moveRouteGroup(
+  route: OptimizedRoute,
+  startLocationId: string,
+  doneGroupCount: number,
+  groupIndex: number,
+  delta: -1 | 1,
+): OptimizedRoute | null {
+  const groups = groupRouteByLocation(route.stops)
+  const nextIndex = groupIndex + delta
+  if (groupIndex < doneGroupCount || nextIndex < doneGroupCount) return null
+  if (nextIndex < 0 || nextIndex >= groups.length) return null
+
+  const nextGroups = groups.slice()
+  const [moved] = nextGroups.splice(groupIndex, 1)
+  nextGroups.splice(nextIndex, 0, moved)
+
+  const prefixStops = nextGroups.slice(0, doneGroupCount).flatMap((g) => g.actions)
+  const restStops = nextGroups.slice(doneGroupCount).flatMap((g) => g.actions)
+  const pool = poolAfter(prefixStops)
+  if (!pool) return null
+  const prevLocationId = prefixStops.length
+    ? prefixStops[prefixStops.length - 1].locationId
+    : startLocationId
+  const load = prefixStops.length
+    ? prefixStops[prefixStops.length - 1].cargoAfter
+    : 0
+  const suffix = resequenceSuffix(
+    restStops,
+    prevLocationId,
+    load,
+    route.capacityScu,
+    pool,
+  )
+  if (!suffix) return null
+
+  const stops = [...prefixStops, ...suffix]
+  const peakLoad = stops.reduce((m, s) => Math.max(m, s.cargoAfter), 0)
+  return {
+    ...route,
+    stops,
+    totalDistance: stops.reduce((s, x) => s + x.legDistance, 0),
+    peakLoad,
+  }
 }
 
 export function formatDistance(gm: number): string {
