@@ -84,6 +84,42 @@ export function boxesToCounts(boxes: number[]): { size: number; count: number }[
     .map(([size, count]) => ({ size, count }))
 }
 
+/** Expand size→count map into one entry per crate, largest first. */
+export function countsToBoxes(counts: Record<number, number>): number[] {
+  const boxes: number[] = []
+  const sizes = Object.keys(counts)
+    .map((size) => Number(size))
+    .filter((size) => CRATE_SIZES.includes(size as CrateSize))
+    .sort((a, b) => b - a)
+  for (const size of sizes) {
+    const n = Math.max(0, Math.round(counts[size] || 0))
+    for (let i = 0; i < n; i++) boxes.push(size)
+  }
+  return boxes
+}
+
+/**
+ * Keep a user crate list only when every size is legal and the crates sum to the stop.
+ * Otherwise the route falls back to the largest-crate packing.
+ */
+export function sanitizeBoxes(
+  raw: unknown,
+  scu: number,
+  maxUnitScu?: number,
+): number[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined
+  const cap = maxUnitScu == null ? CRATE_SIZES[CRATE_SIZES.length - 1] : normalizeCrateSize(maxUnitScu)
+  const boxes: number[] = []
+  for (const n of raw) {
+    const size = Math.round(Number(n))
+    if (!CRATE_SIZES.includes(size as CrateSize) || size > cap || size <= 0) return undefined
+    boxes.push(size)
+  }
+  const sum = boxes.reduce((total, size) => total + size, 0)
+  if (sum !== Math.max(0, Math.round(scu))) return undefined
+  return boxes
+}
+
 /** Expand size→count map back to total SCU. */
 export function countsToScu(counts: Record<number, number>): number {
   let total = 0
@@ -109,13 +145,21 @@ function amendObjectivePickup(
   actualScu: number,
   maxUnitScu: number,
   missionTotalFallback: number,
+  boxes?: number[],
 ): MissionObjective | null {
   const idx = objective.pickups.findIndex((p) => p.locationId === locationId)
   if (idx < 0) return null
 
   const pickups = objective.pickups.map((p) => ({ ...p }))
   const actual = Math.max(0, Math.round(actualScu))
-  pickups[idx] = { ...pickups[idx], scu: actual, confirmed: true }
+  const cleaned = sanitizeBoxes(boxes, actual, maxUnitScu)
+  const { boxes: _previous, ...kept } = pickups[idx]
+  pickups[idx] = {
+    ...kept,
+    scu: actual,
+    confirmed: true,
+    ...(cleaned ? { boxes: cleaned } : {}),
+  }
 
   const objTotal = objective.totalScu > 0 ? objective.totalScu : missionTotalFallback
   const usedThrough = pickups.slice(0, idx + 1).reduce((s, p) => s + p.scu, 0)
@@ -131,8 +175,9 @@ function amendObjectivePickup(
   if (followingIdx.length) {
     const amounts = spreadCargo(toSpread, followingIdx.length, maxUnitScu)
     followingIdx.forEach((fi, j) => {
+      const { boxes: _stale, ...kept } = pickups[fi]
       pickups[fi] = {
-        ...pickups[fi],
+        ...kept,
         scu: amounts[j] ?? 0,
         confirmed: false,
       }
@@ -157,22 +202,29 @@ export function amendPickupActual(
   mission: Mission,
   locationId: string,
   actualScu: number,
+  boxes?: number[],
+  commodity?: string,
 ): Mission {
   const objectives = legacyMissionToObjectives(mission)
+  const wanted = commodity?.trim()
   let found = false
-  const nextObjectives = objectives.map((o) => {
+  const apply = (o: MissionObjective, requireCommodity: boolean) => {
     if (found) return o
+    if (requireCommodity && wanted && o.commodity.trim() !== wanted) return o
     const amended = amendObjectivePickup(
       o,
       locationId,
       actualScu,
       mission.maxUnitScu,
       mission.totalScu,
+      boxes,
     )
     if (!amended) return o
     found = true
     return amended
-  })
+  }
+  let nextObjectives = objectives.map((o) => apply(o, true))
+  if (!found && wanted) nextObjectives = objectives.map((o) => apply(o, false))
   if (!found) return mission
   return withObjectiveAggregates({ ...mission, objectives: nextObjectives })
 }
@@ -191,7 +243,8 @@ export function respreadUnconfirmed(mission: Mission): Mission {
     if (openIdx.length) {
       const amounts = spreadCargo(toSpread, openIdx.length, mission.maxUnitScu)
       openIdx.forEach((i, j) => {
-        pickups[i] = { ...pickups[i], scu: amounts[j] ?? 0 }
+        const { boxes: _stale, ...kept } = pickups[i]
+        pickups[i] = { ...kept, scu: amounts[j] ?? 0 }
       })
     }
 
@@ -423,7 +476,15 @@ export function createMission(input: {
       ...o,
       pickups: o.pickups.map((p) => {
         const prior = priorByLoc.get(p.locationId)
-        return prior ? { ...p, scu: prior.scu, confirmed: true } : p
+        if (!prior) return p
+        const boxes = sanitizeBoxes(prior.boxes, prior.scu, maxUnitScu)
+        const { boxes: _stale, ...kept } = p
+        return {
+          ...kept,
+          scu: prior.scu,
+          confirmed: true,
+          ...(boxes ? { boxes } : {}),
+        }
       }),
     }))
     mission = withObjectiveAggregates({ ...mission, objectives: nextObjectives })

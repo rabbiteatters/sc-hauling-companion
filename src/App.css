@@ -2759,6 +2759,8 @@ button.danger {
 
 .amend-popup {
   width: min(17.5rem, 100%);
+  max-height: min(32rem, calc(100dvh - 2rem));
+  overflow: auto;
   padding: 0.75rem 0.8rem;
   background: #121a22;
   border: 1px solid rgba(148, 176, 196, 0.22);

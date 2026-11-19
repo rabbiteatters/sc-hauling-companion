@@ -3,7 +3,7 @@ import { coerceMissions } from './appCache'
 import type { CapacityMode } from './appCache'
 import { buildAutoMissionName, HAUL_RANKS, HAUL_TYPES } from './haulTypes'
 import { objectiveRouteParts } from './objectives'
-import { formatDemoMissionCode, formatMissionCode } from './spread'
+import { formatDemoMissionCode, formatMissionCode, sanitizeBoxes, scuToBoxes } from './spread'
 import type { Mission, MissionObjective, OptimizedRoute, RouteStop, StopKind } from '../types'
 
 const SESSION_KEY = 'sc-hauling-route-session-v1'
@@ -275,7 +275,18 @@ function packBinary(snapshot: ShareSnapshot): Uint8Array {
   const hasLoadNote = snapshot.missions.some((m) =>
     missionObjectives(m).some((o) => Boolean(o.loadNote?.trim())),
   )
-  w.u8(hasLoadNote ? 2 : 1)
+  const hasCustomBoxes = snapshot.missions.some((m) =>
+    missionObjectives(m).some((o) =>
+      o.pickups.some((p) => {
+        const boxes = sanitizeBoxes(p.boxes, p.scu, m.maxUnitScu)
+        if (!boxes) return false
+        const greedy = [...scuToBoxes(p.scu, m.maxUnitScu)].sort((a, b) => b - a)
+        const chosen = [...boxes].sort((a, b) => b - a)
+        return chosen.length !== greedy.length || chosen.some((size, i) => size !== greedy[i])
+      }),
+    ),
+  )
+  w.u8(hasCustomBoxes ? 3 : hasLoadNote ? 2 : 1)
   w.u8(flags)
   w.vu(custom ? snapshot.customScu : snapshot.capacityScu)
   if (shipId) {
@@ -313,12 +324,17 @@ function packBinary(snapshot: ShareSnapshot): Uint8Array {
     w.vu(objectives.length)
     for (const o of objectives) {
       w.str(o.commodity)
-      if (hasLoadNote) w.str(o.loadNote?.trim() ?? '')
+      if (hasLoadNote || hasCustomBoxes) w.str(o.loadNote?.trim() ?? '')
       w.vu(o.totalScu)
       w.vu(o.pickups.length)
       for (const p of o.pickups) {
         w.loc(p.locationId)
         w.vu((Math.max(0, Math.round(p.scu)) << 1) | (p.confirmed ? 1 : 0))
+        if (hasCustomBoxes) {
+          const boxes = sanitizeBoxes(p.boxes, p.scu, m.maxUnitScu) ?? []
+          w.vu(boxes.length)
+          for (const size of boxes) w.vu(size)
+        }
       }
       w.vu(o.dropoffs.length)
       for (const d of o.dropoffs) {
@@ -339,7 +355,7 @@ function packBinary(snapshot: ShareSnapshot): Uint8Array {
 function unpackBinary(bytes: Uint8Array): unknown {
   const r = new ShareReader(bytes)
   const version = r.u8()
-  if (version !== 1 && version !== 2) throw new Error('version')
+  if (version !== 1 && version !== 2 && version !== 3) throw new Error('version')
   const flags = r.u8()
   const custom = (flags & F_CUSTOM) !== 0
   const scu = r.vu()
@@ -431,11 +447,21 @@ function readObjective(r: ShareReader, index: number, version: number): Record<s
   for (let i = 0; i < pickCount; i++) {
     const locationId = r.loc()
     const packed = r.vu()
+    const scu = packed >> 1
+    let boxes: number[] | undefined
+    if (version >= 3) {
+      const count = r.vu()
+      if (count > 64) throw new Error('boxes')
+      const list: number[] = []
+      for (let b = 0; b < count; b++) list.push(r.vu())
+      boxes = sanitizeBoxes(list, scu)
+    }
     if (!locationId) continue
     pickups.push({
       locationId,
-      scu: packed >> 1,
+      scu,
       ...(packed & 1 ? { confirmed: true } : {}),
+      ...(boxes ? { boxes } : {}),
     })
   }
   const dropCount = r.vu()

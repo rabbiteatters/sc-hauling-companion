@@ -1,6 +1,6 @@
 import { locationLabel } from '../store/catalog'
 import type { Mission, MissionObjective, MissionStop } from '../types'
-import { buildDropoffs, buildStops, DEFAULT_MAX_UNIT_SCU } from './spread'
+import { buildDropoffs, buildStops, DEFAULT_MAX_UNIT_SCU, sanitizeBoxes } from './spread'
 
 export function newObjectiveId(): string {
   return crypto.randomUUID()
@@ -20,10 +20,13 @@ export function createEmptyObjective(
 }
 
 function cloneStop(s: MissionStop): MissionStop {
+  const scu = Math.max(0, Math.round(s.scu) || 0)
+  const boxes = sanitizeBoxes(s.boxes, scu)
   return {
     locationId: s.locationId,
-    scu: Math.max(0, Math.round(s.scu) || 0),
+    scu,
     confirmed: Boolean(s.confirmed),
+    ...(boxes ? { boxes } : {}),
   }
 }
 
@@ -33,11 +36,16 @@ export function sanitizeObjective(raw: unknown): MissionObjective | null {
   const pickups = Array.isArray(o.pickups)
     ? o.pickups
         .filter((p) => p && typeof p.locationId === 'string')
-        .map((p) => ({
-          locationId: p.locationId,
-          scu: Math.max(0, Number(p.scu) || 0),
-          confirmed: Boolean(p.confirmed),
-        }))
+        .map((p) => {
+          const scu = Math.max(0, Number(p.scu) || 0)
+          const boxes = sanitizeBoxes(p.boxes, scu)
+          return {
+            locationId: p.locationId,
+            scu,
+            confirmed: Boolean(p.confirmed),
+            ...(boxes ? { boxes } : {}),
+          }
+        })
     : []
   const dropoffs = Array.isArray(o.dropoffs)
     ? o.dropoffs

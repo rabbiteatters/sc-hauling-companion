@@ -60,6 +60,8 @@ export interface MissionStop {
   scu: number
   /** User confirmed actual amount on site — following stops re-spread around this */
   confirmed?: boolean
+  /** Crates the user set for this pickup. Shown as-is instead of repacking into the largest size. */
+  boxes?: number[]
 }
 
 /** One commodity leg within a mission (cargo source of truth). */

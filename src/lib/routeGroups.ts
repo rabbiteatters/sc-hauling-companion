@@ -1,5 +1,5 @@
-import type { Mission, OptimizedRoute, RouteLocationGroup, RouteStop } from '../types'
-import { scuToBoxes } from './spread'
+import type { Mission, MissionObjective, OptimizedRoute, RouteLocationGroup, RouteStop } from '../types'
+import { sanitizeBoxes, scuToBoxes } from './spread'
 
 /** Collapse consecutive actions at the same location into one visit card. */
 export function groupRouteByLocation(stops: RouteStop[]): RouteLocationGroup[] {
@@ -60,6 +60,42 @@ function loadNoteFor(mission: Mission | undefined, commodity?: string): string {
   return match?.loadNote?.trim() ?? ''
 }
 
+function objectivesForStop(mission: Mission | undefined, commodity?: string): MissionObjective[] {
+  const objectives = mission?.objectives ?? []
+  const wanted = commodity?.trim()
+  if (!wanted) return objectives
+  const matched = objectives.filter((o) => o.commodity.trim() === wanted)
+  return matched.length ? matched : objectives
+}
+
+/** User-set crates when they still add up to this action; otherwise the largest legal packing. */
+function boxesForStop(mission: Mission | undefined, stop: RouteStop): number[] {
+  const maxUnit = mission?.maxUnitScu ?? 8
+  const scu = Math.abs(stop.cargoDelta)
+  const objectives = objectivesForStop(mission, stop.commodity)
+  if (stop.kind === 'pickup') {
+    for (const objective of objectives) {
+      const pickup = objective.pickups.find((p) => p.locationId === stop.locationId)
+      const boxes = sanitizeBoxes(pickup?.boxes, scu, maxUnit)
+      if (boxes) return boxes
+    }
+    return scuToBoxes(scu, maxUnit)
+  }
+
+  const stored: number[] = []
+  let covered = 0
+  for (const objective of objectives) {
+    for (const pickup of objective.pickups) {
+      const boxes =
+        sanitizeBoxes(pickup.boxes, pickup.scu, maxUnit) ?? scuToBoxes(pickup.scu, maxUnit)
+      stored.push(...boxes)
+      covered += pickup.scu
+    }
+  }
+  if (covered === scu && stored.length) return stored
+  return scuToBoxes(scu, maxUnit)
+}
+
 /** Attach box breakdowns + clearer mission labels from catalog. */
 export function enrichStopsWithBoxes(
   route: OptimizedRoute,
@@ -68,8 +104,10 @@ export function enrichStopsWithBoxes(
   const byId = new Map(missions.map((m) => [m.id, m]))
   const stops = route.stops.map((s) => {
     const m = byId.get(s.missionId)
-    const maxUnit = m?.maxUnitScu ?? 8
-    const pickup = m?.pickups.find((p) => p.locationId === s.locationId)
+    const objectives = objectivesForStop(m, s.commodity)
+    const pickup = objectives
+      .flatMap((o) => o.pickups)
+      .find((p) => p.locationId === s.locationId)
     const labelParts = [
       m?.code,
       m?.commodity,
@@ -80,8 +118,8 @@ export function enrichStopsWithBoxes(
     return {
       ...s,
       missionName: labelParts.join(' · ') || s.missionName,
-      boxes: scuToBoxes(Math.abs(s.cargoDelta), maxUnit),
-      commodity: m?.commodity,
+      boxes: boxesForStop(m, s),
+      commodity: s.commodity || m?.commodity,
       confirmed: s.kind === 'pickup' ? Boolean(pickup?.confirmed) : undefined,
       ...(loadNote ? { loadNote } : {}),
     }

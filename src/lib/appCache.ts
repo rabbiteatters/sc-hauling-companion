@@ -13,7 +13,7 @@ import {
   withObjectiveAggregates,
   type DraftObjective,
 } from './objectives'
-import { clampMissionCode, DEFAULT_MAX_UNIT_SCU, normalizeCrateSize } from './spread'
+import { clampMissionCode, DEFAULT_MAX_UNIT_SCU, normalizeCrateSize, sanitizeBoxes } from './spread'
 import type { HaulType, Mission, MissionStop } from '../types'
 
 const STORAGE_KEY = 'sc-hauling-app-cache-v1'
@@ -97,10 +97,13 @@ function sanitizeStops(raw: unknown, withConfirmed: boolean): MissionStop[] {
     .filter((p) => p && typeof (p as MissionStop).locationId === 'string')
     .map((p) => {
       const s = p as MissionStop
+      const scu = Math.max(0, Number(s.scu) || 0)
+      const boxes = withConfirmed ? sanitizeBoxes(s.boxes, scu) : undefined
       return {
         locationId: s.locationId,
-        scu: Math.max(0, Number(s.scu) || 0),
+        scu,
         ...(withConfirmed ? { confirmed: Boolean(s.confirmed) } : {}),
+        ...(boxes ? { boxes } : {}),
       }
     })
 }

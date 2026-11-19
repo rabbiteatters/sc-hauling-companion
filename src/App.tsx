@@ -1170,13 +1170,28 @@ export default function App() {
     setMissionsInitialized(true)
   }
 
-  function amendPickup(missionId: string, locationId: string, actualScu: number) {
+  function amendPickup(
+    missionId: string,
+    locationId: string,
+    actualScu: number,
+    boxes: number[] = [],
+    commodity?: string,
+  ) {
+    const wanted = commodity?.trim()
+    const previous = missions.find((m) => m.id === missionId)
+    const previousStop = previous?.objectives
+      .filter((o) => !wanted || o.commodity.trim() === wanted)
+      .flatMap((o) => o.pickups)
+      .find((p) => p.locationId === locationId)
+    const scuChanged = (previousStop?.scu ?? -1) !== Math.max(0, Math.round(actualScu))
     const next = missions.map((m) =>
-      m.id === missionId ? amendPickupActual(m, locationId, actualScu) : m,
+      m.id === missionId
+        ? amendPickupActual(m, locationId, actualScu, boxes, commodity)
+        : m,
     )
     const ready = repairMissionLocations(next)
     setMissions(ready)
-    if (startId) {
+    if (startId && scuChanged) {
       setRoute(
         optimizeRoute(ready.filter(isMissionEnabled), startId, capacityScu),
       )

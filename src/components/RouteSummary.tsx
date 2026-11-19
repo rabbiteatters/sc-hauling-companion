@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { formatAuec, formatDistance, formatHoldCapacity } from '../lib/optimizer'
 import { enrichStopsWithBoxes, followingDoneIndices, groupRouteByLocation, leadingDoneCount } from '../lib/routeGroups'
 import {
   allowedCrateSizes,
+  countsToBoxes,
   countsToScu,
   formatBoxList,
   scuToBoxes,
@@ -23,7 +25,13 @@ interface Props {
   onCalculateRest: (currentStep: number) => void
   onToggleRearrange: () => void
   onMoveGroup: (index: number, delta: -1 | 1) => void
-  onAmendPickup: (missionId: string, locationId: string, actualScu: number) => void
+  onAmendPickup: (
+    missionId: string,
+    locationId: string,
+    actualScu: number,
+    boxes: number[],
+    commodity?: string,
+  ) => void
   onLoadNote: (missionId: string, commodity: string | undefined, note: string) => void
 }
 
@@ -165,7 +173,9 @@ export function RouteSummary({
                           missions.find((m) => m.id === a.missionId)?.maxUnitScu ?? 8
                         }
                         confirmed={Boolean(a.confirmed)}
-                        onApply={(scu) => onAmendPickup(a.missionId, a.locationId, scu)}
+                        onApply={(scu, boxes) =>
+                          onAmendPickup(a.missionId, a.locationId, scu, boxes, a.commodity)
+                        }
                       />
                     </div>
                   </li>
@@ -411,7 +421,9 @@ export function RouteSummary({
                           missions.find((m) => m.id === a.missionId)?.maxUnitScu ?? 8
                         }
                         confirmed={Boolean(a.confirmed)}
-                        onApply={(scu) => onAmendPickup(a.missionId, a.locationId, scu)}
+                        onApply={(scu, boxes) =>
+                          onAmendPickup(a.missionId, a.locationId, scu, boxes, a.commodity)
+                        }
                       />
                     </div>
                   </li>
@@ -581,7 +593,7 @@ function AmendPickup({
   boxes?: number[]
   maxUnitScu?: number
   confirmed: boolean
-  onApply: (scu: number) => void
+  onApply: (scu: number, boxes: number[]) => void
 }) {
   const [open, setOpen] = useState(false)
   const [counts, setCounts] = useState(() => countsFromBoxes(boxes, planned, maxUnitScu))
@@ -615,7 +627,8 @@ function AmendPickup({
         {confirmed ? 'Edit' : 'Amend'}
       </button>
 
-      {open && (
+      {open &&
+        createPortal(
         <div
           className="amend-popup-backdrop"
           role="presentation"
@@ -677,7 +690,7 @@ function AmendPickup({
                 type="button"
                 className="primary"
                 onClick={() => {
-                  onApply(total)
+                  onApply(total, countsToBoxes(counts))
                   close()
                 }}
               >
@@ -685,8 +698,9 @@ function AmendPickup({
               </button>
             </div>
           </div>
-        </div>
-      )}
+        </div>,
+          document.body,
+        )}
     </div>
   )
 }
