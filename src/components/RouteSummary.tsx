@@ -43,6 +43,8 @@ export function RouteSummary({
 }: Props) {
   const enriched = enrichStopsWithBoxes(route, missions)
   const groups = groupRouteByLocation(enriched.stops)
+  const codeFor = (missionId: string) =>
+    missions.find((m) => m.id === missionId)?.code ?? ''
 
   const maxStep = Math.max(0, groups.length - 1)
   const safeStep = Math.min(step, maxStep)
@@ -144,6 +146,7 @@ export function RouteSummary({
                   <li key={`${a.missionId}-load-${i}`}>
                     <div className="route-step-line">
                       <strong>
+                        <MissionCode code={codeFor(a.missionId)} />
                         {a.commodity || 'Cargo'} {Math.abs(a.cargoDelta)}
                         {a.confirmed ? <span className="confirmed"> ✓</span> : null}
                       </strong>
@@ -193,6 +196,7 @@ export function RouteSummary({
                   <li key={`${a.missionId}-unload-${i}`}>
                     <div className="route-step-line">
                       <strong>
+                        <MissionCode code={codeFor(a.missionId)} />
                         {a.commodity || a.missionName} {Math.abs(a.cargoDelta)}
                       </strong>
                       <CargoSizeGroups boxes={a.boxes} />
@@ -379,6 +383,7 @@ export function RouteSummary({
                     <span className="mini-badge pickup">IN</span>
                     <div className="action-body pickup-compact">
                       <strong>
+                        <MissionCode code={codeFor(a.missionId)} />
                         {a.commodity || 'Cargo'} {Math.abs(a.cargoDelta)}
                         {a.confirmed ? <span className="confirmed"> ✓</span> : null}
                       </strong>
@@ -401,6 +406,7 @@ export function RouteSummary({
                     <span className="mini-badge dropoff">OUT</span>
                     <div className="action-body pickup-compact">
                       <strong>
+                        <MissionCode code={codeFor(a.missionId)} />
                         {a.commodity || a.missionName} {Math.abs(a.cargoDelta)}
                       </strong>
                       <CargoSizeGroups boxes={a.boxes} />
@@ -415,6 +421,11 @@ export function RouteSummary({
       </ol>
     </>
   )
+}
+
+function MissionCode({ code }: { code: string }) {
+  if (!code) return null
+  return <span className="mission-code route-action-code">{code}</span>
 }
 
 const BOX_COLORS: Record<number, string> = {

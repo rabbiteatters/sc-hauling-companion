@@ -2163,6 +2163,12 @@ button.primary.danger {
   margin-right: 0;
 }
 
+.route-action-code {
+  margin-right: 0.35rem;
+  padding: 0.02rem 0.28rem;
+  font-size: 0.68rem;
+}
+
 .tag,
 .method-tag {
   display: inline-block;

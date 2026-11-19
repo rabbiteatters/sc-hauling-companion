@@ -500,6 +500,8 @@ export default function App() {
   const shareNeedsRoute = useRef(false)
   const ocrCancelRef = useRef(false)
   const lastOcrFillSig = useRef('')
+  /** First fill of a batch can keep a code typed before import. Later images use their own. */
+  const ocrFilledOnce = useRef(false)
   const demoIndexRef = useRef(
     cached.missions.filter((m) => m.source === 'demo').length,
   )
@@ -937,7 +939,7 @@ export default function App() {
     clearPlannedRoute()
   }
 
-  function fillDraftFromMission(m: Mission | null | undefined) {
+  function fillDraftFromMission(m: Mission | null | undefined, keepCode = false) {
     if (!m) {
       setDraftHaul(cached.draftHaul)
       setDraft(
@@ -967,7 +969,9 @@ export default function App() {
         syncDraftFromObjectives({
           code: isDemo
             ? nextDemoMissionCode(missions)
-            : draft.code || nextMissionCode(missions),
+            : keepCode
+              ? draft.code || m.code || nextMissionCode(missions)
+              : m.code || draft.code || nextMissionCode(missions),
           // Demo uses auto title with (DEMO) prefix; OCR/manual keep parsed name
           name: isDemo
             ? buildAutoMissionName({
@@ -997,6 +1001,73 @@ export default function App() {
     setOcrFormKey((k) => k + 1)
   }
 
+  /** Form values for the image currently on screen. Edits win over the scan. */
+  function missionFromDraft(scanned?: Mission): Mission {
+    const objectives = (draft.objectives ?? []).map((o) => createEmptyObjective(o))
+    const route = objectiveRouteParts(objectives)
+    const total = Math.max(
+      1,
+      missionTotalScu(objectives) || Number(draft.totalScu) || scanned?.totalScu || 1,
+    )
+    const isDemo = Boolean(draft.demo) || draft.name.trim().startsWith('(DEMO)')
+    const autoName = buildAutoMissionName({
+      giver: draft.giver.trim(),
+      rank: draft.rank.trim(),
+      haulType: draftHaul,
+      from: route.from,
+      to: route.to,
+      pickupCount: route.pickupCount,
+      dropoffCount: route.dropoffCount,
+      demo: isDemo,
+    })
+    return createMission({
+      id: scanned?.id,
+      code:
+        clampMissionCode(draft.code) ||
+        scanned?.code ||
+        (isDemo ? nextDemoMissionCode(missions) : nextMissionCode(missions)),
+      name:
+        draft.name.trim() ||
+        autoName ||
+        `Haul ${total} SCU → ${route.to}`,
+      haulType: draftHaul,
+      rank: draft.rank.trim() || undefined,
+      giver: draft.giver.trim() || undefined,
+      pickupIds: objectives.flatMap((o) => o.pickups.map((p) => p.locationId)),
+      dropoffIds: objectives.flatMap((o) => o.dropoffs.map((d) => d.locationId)),
+      totalScu: total,
+      maxUnitScu: normalizeCrateSize(draft.maxUnitScu || DEFAULT_MAX_UNIT_SCU),
+      rewardAuec: draft.rewardAuec > 0 ? draft.rewardAuec : undefined,
+      commodity: missionCommodityLabel(objectives) || draft.commodity.trim() || undefined,
+      objectives,
+      source: scanned?.source ?? (isDemo ? 'demo' : 'manual'),
+    })
+  }
+
+  function draftHasCargo(): boolean {
+    return (draft.objectives ?? []).some(
+      (o) => o.pickups.length > 0 || o.dropoffs.length > 0,
+    )
+  }
+
+  /** Store the open form onto the image it belongs to. */
+  function pendingWithCurrentDraft<T extends { items: OcrBatchItem[]; index: number }>(
+    pending: T,
+  ): T {
+    if (!draftHasCargo()) return pending
+    const item = pending.items[pending.index]
+    if (!item) return pending
+    const mission = missionFromDraft(item.missions[0])
+    return {
+      ...pending,
+      items: pending.items.map((it, i) =>
+        i === pending.index
+          ? { ...it, missions: [mission, ...it.missions.slice(1)] }
+          : it,
+      ),
+    }
+  }
+
   // SCMDB demos + givers: refresh at 00:00 / 06:00 / 12:00 / 18:00 (and via Refresh data)
   useEffect(() => startScmdbRefreshSchedule(() => syncGiversFromScmdb()), [])
 
@@ -1024,8 +1095,10 @@ export default function App() {
         ].join('|')
       : `${ocrPending.index}|empty|${item?.imageUrl ?? ''}`
     if (sig === lastOcrFillSig.current) return
+    const keepCode = !ocrFilledOnce.current
+    ocrFilledOnce.current = true
     lastOcrFillSig.current = sig
-    fillDraftFromMission(m)
+    fillDraftFromMission(m, keepCode)
   }, [modalStep, ocrPending])
 
   function addMission() {
@@ -1034,79 +1107,12 @@ export default function App() {
         ? ocrPending.items[ocrPending.index]?.missions[0]
         : undefined
 
-    const draftObjectives =
-      draft.objectives?.length > 0
-        ? draft.objectives.map((o) => createEmptyObjective(o))
-        : []
-    const scannedObjectives = scanned
-      ? legacyMissionToObjectives(scanned).map((o) => createEmptyObjective(o))
-      : []
-
-    // Prefer draft objectives when user edited; else OCR-parsed objectives
-    const useDraftStops = draftObjectives.some(
-      (o) => o.pickups.length > 0 && o.dropoffs.length > 0,
-    )
-    const objectives = useDraftStops
-      ? draftObjectives
-      : scannedObjectives.length
-        ? scannedObjectives
-        : draftObjectives
-
+    const objectives = (draft.objectives ?? []).map((o) => createEmptyObjective(o))
     if (objectivesHaveErrors(objectives)) return
 
-    const route = objectiveRouteParts(objectives)
-    const total = Math.max(
-      1,
-      missionTotalScu(objectives) ||
-        Number(draft.totalScu) ||
-        scanned?.totalScu ||
-        1,
-    )
-
-    const isDemo =
-      Boolean(draft.demo) || draft.name.trim().startsWith('(DEMO)')
-    const code =
-      clampMissionCode(draft.code) ||
-      (isDemo ? nextDemoMissionCode(missions) : nextMissionCode(missions))
-    setMissions((prev) => {
-      const autoName = buildAutoMissionName({
-        giver: draft.giver.trim() || scanned?.giver,
-        rank: draft.rank.trim() || scanned?.rank,
-        haulType: draftHaul,
-        from: route.from,
-        to: route.to,
-        pickupCount: route.pickupCount,
-        dropoffCount: route.dropoffCount,
-        demo: isDemo,
-      })
-      const mission = createMission({
-        code,
-        name:
-          draft.name.trim() ||
-          scanned?.name ||
-          autoName ||
-          `Haul ${total} SCU → ${route.to}`,
-        haulType: draftHaul,
-        rank: draft.rank.trim() || scanned?.rank,
-        giver: draft.giver.trim() || scanned?.giver,
-        pickupIds: objectives.flatMap((o) => o.pickups.map((p) => p.locationId)),
-        dropoffIds: objectives.flatMap((o) =>
-          o.dropoffs.map((d) => d.locationId),
-        ),
-        totalScu: total,
-        maxUnitScu: normalizeCrateSize(
-          draft.maxUnitScu || scanned?.maxUnitScu || DEFAULT_MAX_UNIT_SCU,
-        ),
-        rewardAuec: Number(draft.rewardAuec) || scanned?.rewardAuec,
-        commodity:
-          missionCommodityLabel(objectives) ||
-          draft.commodity.trim() ||
-          scanned?.commodity,
-        objectives,
-        source: scanned ? 'ocr' : isDemo ? 'demo' : 'manual',
-      })
-      return [...prev, mission]
-    })
+    const mission = missionFromDraft(scanned)
+    const code = mission.code
+    setMissions((prev) => [...prev, mission])
     setMissionsInitialized(true)
     clearPlannedRoute()
     setDraft((d) => {
@@ -1221,6 +1227,7 @@ export default function App() {
       setOcrPending(null)
       setOcrStatus('')
       lastOcrFillSig.current = ''
+      ocrFilledOnce.current = false
     }
   }
 
@@ -1371,6 +1378,7 @@ export default function App() {
 
   function clearOcrPending() {
     lastOcrFillSig.current = ''
+    ocrFilledOnce.current = false
     revokePendingItems(ocrPending)
     setOcrPending(null)
     resetOcrFileInput()
@@ -1419,6 +1427,7 @@ export default function App() {
     const batchTotal = opts?.batchTotal ?? items.length
     const batchDone = opts?.batchDone ?? items.length
     lastOcrFillSig.current = ''
+    ocrFilledOnce.current = false
     setOcrPending({ items, index: 0, applyToMissionId, batchTotal, batchDone })
     if (applyToMissionId) {
       setEditingMissionId(applyToMissionId)
@@ -1596,6 +1605,7 @@ export default function App() {
     setOcrProgress(0)
     setModalStep('add')
     lastOcrFillSig.current = ''
+    ocrFilledOnce.current = false
     setOcrPending({
       items: [],
       index: 0,
@@ -1702,8 +1712,11 @@ export default function App() {
 
   function addOcrAll() {
     if (!ocrPending) return
+    const objectives = (draft.objectives ?? []).map((o) => createEmptyObjective(o))
+    if (draftHasCargo() && objectivesHaveErrors(objectives)) return
     ocrCancelRef.current = true
-    const all = ocrPending.items.flatMap((it) => it.missions)
+    const pending = pendingWithCurrentDraft(ocrPending)
+    const all = pending.items.flatMap((it) => it.missions)
     addOcrMissions(all)
     clearOcrPending()
     setOcrStatus(all.length ? `Added ${all.length} mission${all.length === 1 ? '' : 's'}` : '')
@@ -1713,9 +1726,10 @@ export default function App() {
   function selectOcrIndex(index: number) {
     if (!ocrPending || index < 0 || index >= ocrPending.items.length) return
     if (index === ocrPending.index) return
+    const pending = pendingWithCurrentDraft(ocrPending)
     // Index change triggers the fill effect; flush so the form key/draft update together
     flushSync(() => {
-      setOcrPending({ ...ocrPending, index })
+      setOcrPending({ ...pending, index })
     })
   }
 
