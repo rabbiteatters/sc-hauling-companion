@@ -45,6 +45,7 @@ import {
   legacyMissionToObjectives,
   missionCommodityLabel,
   missionTotalScu,
+  withObjectiveAggregates,
   objectiveRouteParts,
   objectivesHaveErrors,
 } from './lib/objectives'
@@ -1141,6 +1142,34 @@ export default function App() {
     setModalStep(null)
   }
 
+  function setCargoLoadNote(
+    missionId: string,
+    commodity: string | undefined,
+    note: string,
+  ) {
+    const trimmed = note.trim().slice(0, 80)
+    setMissions((list) =>
+      list.map((m) => {
+        if (m.id !== missionId) return m
+        const wanted = commodity?.trim()
+        let matched = false
+        const objectives = m.objectives.map((o) => {
+          if (wanted && o.commodity.trim() !== wanted) return o
+          matched = true
+          return { ...o, ...(trimmed ? { loadNote: trimmed } : { loadNote: undefined }) }
+        })
+        if (!matched && objectives[0]) {
+          objectives[0] = {
+            ...objectives[0],
+            ...(trimmed ? { loadNote: trimmed } : { loadNote: undefined }),
+          }
+        }
+        return withObjectiveAggregates({ ...m, objectives })
+      }),
+    )
+    setMissionsInitialized(true)
+  }
+
   function amendPickup(missionId: string, locationId: string, actualScu: number) {
     const next = missions.map((m) =>
       m.id === missionId ? amendPickupActual(m, locationId, actualScu) : m,
@@ -2136,6 +2165,15 @@ export default function App() {
                           getName={locationLabel}
                         />
                       </p>
+                      {m.objectives.some((o) => o.loadNote?.trim()) && (
+                        <p className="mission-load-note">
+                          Load:{' '}
+                          {m.objectives
+                            .map((o) => o.loadNote?.trim())
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </p>
+                      )}
                     </div>
                     <div
                       className={`mission-actions${missionsRearrangeMode ? ' rearranging' : ''}`}
@@ -2243,6 +2281,7 @@ export default function App() {
               onToggleRearrange={() => setRouteRearrange((v) => !v)}
               onMoveGroup={moveRemainingGroup}
               onAmendPickup={amendPickup}
+              onLoadNote={setCargoLoadNote}
             />
           )}
         </section>

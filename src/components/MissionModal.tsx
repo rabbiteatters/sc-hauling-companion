@@ -64,6 +64,7 @@ function cloneObjectives(list: DraftObjective[]): DraftObjective[] {
       totalScu: o.totalScu,
       pickups: o.pickups.map((p) => ({ ...p })),
       dropoffs: o.dropoffs.map((d) => ({ ...d })),
+      loadNote: o.loadNote,
     }),
   )
 }

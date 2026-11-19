@@ -69,6 +69,8 @@ export interface MissionObjective {
   totalScu: number
   pickups: MissionStop[]
   dropoffs: MissionStop[]
+  /** Where this cargo sits in the hold, so the right stack is unloaded. */
+  loadNote?: string
 }
 
 export interface Mission {
@@ -129,6 +131,8 @@ export interface RouteStop {
   boxes?: number[]
   commodity?: string
   confirmed?: boolean
+  /** Copied from the cargo leg for display. */
+  loadNote?: string
 }
 
 /** Consecutive route actions at the same place, collapsed for display */

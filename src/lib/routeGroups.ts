@@ -51,6 +51,15 @@ export function followingDoneIndices(
   return [...chosen].sort((a, b) => a - b)
 }
 
+function loadNoteFor(mission: Mission | undefined, commodity?: string): string {
+  if (!mission?.objectives?.length) return ''
+  const wanted = commodity?.trim()
+  const match = wanted
+    ? mission.objectives.find((o) => o.commodity.trim() === wanted)
+    : mission.objectives[0]
+  return match?.loadNote?.trim() ?? ''
+}
+
 /** Attach box breakdowns + clearer mission labels from catalog. */
 export function enrichStopsWithBoxes(
   route: OptimizedRoute,
@@ -67,12 +76,14 @@ export function enrichStopsWithBoxes(
       m ? `${m.totalScu} SCU` : null,
       s.missionName,
     ].filter(Boolean)
+    const loadNote = loadNoteFor(m, s.commodity)
     return {
       ...s,
       missionName: labelParts.join(' · ') || s.missionName,
       boxes: scuToBoxes(Math.abs(s.cargoDelta), maxUnit),
       commodity: m?.commodity,
       confirmed: s.kind === 'pickup' ? Boolean(pickup?.confirmed) : undefined,
+      ...(loadNote ? { loadNote } : {}),
     }
   })
   return { ...route, stops }

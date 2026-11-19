@@ -2169,6 +2169,38 @@ button.primary.danger {
   font-size: 0.68rem;
 }
 
+.mission-load-note {
+  margin: 0.2rem 0 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.objective-load-note {
+  margin-top: 0.45rem;
+}
+
+.objective-load-note-add {
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+}
+
+.load-note-toggle {
+  padding: 0.05rem 0.35rem;
+  font-size: 0.72rem;
+}
+
+.load-note {
+  font-style: italic;
+  color: var(--muted);
+}
+
+.load-note-input {
+  width: 9.5rem;
+  max-width: 42vw;
+  padding: 0.12rem 0.35rem;
+  font-size: 0.75rem;
+}
+
 .tag,
 .method-tag {
   display: inline-block;

@@ -272,7 +272,10 @@ function packBinary(snapshot: ShareSnapshot): Uint8Array {
   if (step > 0) flags |= F_STEP
   if (shipNum) flags |= F_SHIP_NUM
 
-  w.u8(1)
+  const hasLoadNote = snapshot.missions.some((m) =>
+    missionObjectives(m).some((o) => Boolean(o.loadNote?.trim())),
+  )
+  w.u8(hasLoadNote ? 2 : 1)
   w.u8(flags)
   w.vu(custom ? snapshot.customScu : snapshot.capacityScu)
   if (shipId) {
@@ -310,6 +313,7 @@ function packBinary(snapshot: ShareSnapshot): Uint8Array {
     w.vu(objectives.length)
     for (const o of objectives) {
       w.str(o.commodity)
+      if (hasLoadNote) w.str(o.loadNote?.trim() ?? '')
       w.vu(o.totalScu)
       w.vu(o.pickups.length)
       for (const p of o.pickups) {
@@ -334,7 +338,8 @@ function packBinary(snapshot: ShareSnapshot): Uint8Array {
 
 function unpackBinary(bytes: Uint8Array): unknown {
   const r = new ShareReader(bytes)
-  if (r.u8() !== 1) throw new Error('version')
+  const version = r.u8()
+  if (version !== 1 && version !== 2) throw new Error('version')
   const flags = r.u8()
   const custom = (flags & F_CUSTOM) !== 0
   const scu = r.vu()
@@ -348,7 +353,7 @@ function unpackBinary(bytes: Uint8Array): unknown {
   const missionCount = r.vu()
   if (missionCount > 200) throw new Error('missions')
   const missions = []
-  for (let index = 0; index < missionCount; index++) missions.push(readMission(r, index))
+  for (let index = 0; index < missionCount; index++) missions.push(readMission(r, index, version))
   const done = []
   if (flags & F_DONE) {
     const count = r.vu()
@@ -369,7 +374,7 @@ function unpackBinary(bytes: Uint8Array): unknown {
   }
 }
 
-function readMission(r: ShareReader, index: number): Record<string, unknown> {
+function readMission(r: ShareReader, index: number, version: number): Record<string, unknown> {
   const haulRank = r.u8()
   const meta = r.u8()
   const maxUnitScu = r.vu()
@@ -390,7 +395,7 @@ function readMission(r: ShareReader, index: number): Record<string, unknown> {
   const objCount = r.vu()
   if (objCount > 20) throw new Error('objectives')
   const objectives = []
-  for (let oi = 0; oi < objCount; oi++) objectives.push(readObjective(r, oi))
+  for (let oi = 0; oi < objCount; oi++) objectives.push(readObjective(r, oi, version))
   const draft = {
     giver,
     rank,
@@ -416,8 +421,9 @@ function readMission(r: ShareReader, index: number): Record<string, unknown> {
   }
 }
 
-function readObjective(r: ShareReader, index: number): Record<string, unknown> {
+function readObjective(r: ShareReader, index: number, version: number): Record<string, unknown> {
   const commodity = r.str()
+  const loadNote = version >= 2 ? r.str().trim().slice(0, 80) : ''
   const totalScu = r.vu()
   const pickCount = r.vu()
   if (pickCount > 32) throw new Error('pickups')
@@ -441,7 +447,14 @@ function readObjective(r: ShareReader, index: number): Record<string, unknown> {
     if (!locationId) continue
     dropoffs.push({ locationId, scu })
   }
-  return { id: `o${index + 1}`, commodity, totalScu, pickups, dropoffs }
+  return {
+    id: `o${index + 1}`,
+    commodity,
+    totalScu,
+    pickups,
+    dropoffs,
+    ...(loadNote ? { loadNote } : {}),
+  }
 }
 
 function unpackSnapshot(raw: unknown): unknown {

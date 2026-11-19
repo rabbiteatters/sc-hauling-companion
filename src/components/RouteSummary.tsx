@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatAuec, formatDistance, formatHoldCapacity } from '../lib/optimizer'
 import { enrichStopsWithBoxes, followingDoneIndices, groupRouteByLocation, leadingDoneCount } from '../lib/routeGroups'
 import {
@@ -24,6 +24,7 @@ interface Props {
   onToggleRearrange: () => void
   onMoveGroup: (index: number, delta: -1 | 1) => void
   onAmendPickup: (missionId: string, locationId: string, actualScu: number) => void
+  onLoadNote: (missionId: string, commodity: string | undefined, note: string) => void
 }
 
 export function RouteSummary({
@@ -40,6 +41,7 @@ export function RouteSummary({
   onToggleRearrange,
   onMoveGroup,
   onAmendPickup,
+  onLoadNote,
 }: Props) {
   const enriched = enrichStopsWithBoxes(route, missions)
   const groups = groupRouteByLocation(enriched.stops)
@@ -150,6 +152,10 @@ export function RouteSummary({
                         {a.commodity || 'Cargo'} {Math.abs(a.cargoDelta)}
                         {a.confirmed ? <span className="confirmed"> ✓</span> : null}
                       </strong>
+                      <LoadNote
+                        note={a.loadNote}
+                        onSave={(note) => onLoadNote(a.missionId, a.commodity, note)}
+                      />
                       <CargoSizeGroups boxes={a.boxes} />
                       <AmendPickup
                         label={a.commodity || 'Cargo'}
@@ -199,6 +205,10 @@ export function RouteSummary({
                         <MissionCode code={codeFor(a.missionId)} />
                         {a.commodity || a.missionName} {Math.abs(a.cargoDelta)}
                       </strong>
+                      <LoadNote
+                        note={a.loadNote}
+                        onSave={(note) => onLoadNote(a.missionId, a.commodity, note)}
+                      />
                       <CargoSizeGroups boxes={a.boxes} />
                     </div>
                   </li>
@@ -387,6 +397,10 @@ export function RouteSummary({
                         {a.commodity || 'Cargo'} {Math.abs(a.cargoDelta)}
                         {a.confirmed ? <span className="confirmed"> ✓</span> : null}
                       </strong>
+                      <LoadNote
+                        note={a.loadNote}
+                        onSave={(note) => onLoadNote(a.missionId, a.commodity, note)}
+                      />
                       <CargoSizeGroups boxes={a.boxes} />
                       <span className="pickup-hold">hold {a.cargoAfter}</span>
                       <AmendPickup
@@ -409,6 +423,10 @@ export function RouteSummary({
                         <MissionCode code={codeFor(a.missionId)} />
                         {a.commodity || a.missionName} {Math.abs(a.cargoDelta)}
                       </strong>
+                      <LoadNote
+                        note={a.loadNote}
+                        onSave={(note) => onLoadNote(a.missionId, a.commodity, note)}
+                      />
                       <CargoSizeGroups boxes={a.boxes} />
                       <span className="pickup-hold">hold {a.cargoAfter}</span>
                     </div>
@@ -420,6 +438,67 @@ export function RouteSummary({
         ))}
       </ol>
     </>
+  )
+}
+
+function LoadNote({
+  note,
+  onSave,
+}: {
+  note?: string
+  onSave: (note: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [value, setValue] = useState(note ?? '')
+  const cancelRef = useRef(false)
+
+  useEffect(() => {
+    if (!open) setValue(note ?? '')
+  }, [note, open])
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="ghost load-note-toggle"
+        title={note ? 'Edit load position' : 'Add a load position note'}
+        onClick={() => setOpen(true)}
+      >
+        {note ? <span className="load-note">{note}</span> : 'Note'}
+      </button>
+    )
+  }
+
+  return (
+    <input
+      className="load-note-input"
+      autoFocus
+      maxLength={80}
+      placeholder="Load position"
+      aria-label="Load position"
+      value={value}
+      onChange={(e) => {
+        setValue(e.target.value)
+        onSave(e.target.value)
+      }}
+      onBlur={() => {
+        if (cancelRef.current) {
+          cancelRef.current = false
+          setValue(note ?? '')
+          setOpen(false)
+          return
+        }
+        onSave(value)
+        setOpen(false)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur()
+        if (e.key === 'Escape') {
+          cancelRef.current = true
+          e.currentTarget.blur()
+        }
+      }}
+    />
   )
 }
 

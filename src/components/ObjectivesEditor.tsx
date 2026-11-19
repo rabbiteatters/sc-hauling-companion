@@ -57,6 +57,7 @@ export function ObjectivesEditor({
 
   const [reorderUnlocked, setReorderUnlocked] = useState(false)
   const [expandedId, setExpandedId] = useState<string | null>(list[0]?.id ?? null)
+  const [noteOpen, setNoteOpen] = useState<Record<string, boolean>>({})
   /** Which side sum to highlight while hovering a Total +/- chip */
   const [highlightSide, setHighlightSide] = useState<
     'pickup' | 'dropoff' | 'both' | null
@@ -266,6 +267,32 @@ export function ObjectivesEditor({
                       patchAt(index, { ...obj, commodity })
                     }
                   />
+
+                  {noteOpen[obj.id] || obj.loadNote ? (
+                    <label className="field objective-load-note">
+                      <span>Load position</span>
+                      <input
+                        type="text"
+                        maxLength={80}
+                        value={obj.loadNote ?? ''}
+                        placeholder="Where this cargo sits in the hold"
+                        aria-label={`Load position for ${obj.commodity || 'cargo'}`}
+                        onChange={(e) =>
+                          patchAt(index, { ...obj, loadNote: e.target.value })
+                        }
+                      />
+                    </label>
+                  ) : (
+                    <button
+                      type="button"
+                      className="ghost objective-load-note-add"
+                      onClick={() =>
+                        setNoteOpen((prev) => ({ ...prev, [obj.id]: true }))
+                      }
+                    >
+                      Add load note
+                    </button>
+                  )}
 
                   <div className="field-row objective-total-row">
                     <label

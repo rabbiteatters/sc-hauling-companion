@@ -15,6 +15,7 @@ export function createEmptyObjective(
     totalScu: Math.max(0, Math.round(partial?.totalScu ?? 0)),
     pickups: partial?.pickups?.map(cloneStop) ?? [],
     dropoffs: partial?.dropoffs?.map(cloneStop) ?? [],
+    ...(partial?.loadNote ? { loadNote: partial.loadNote } : {}),
   }
 }
 
@@ -52,6 +53,9 @@ export function sanitizeObjective(raw: unknown): MissionObjective | null {
     totalScu: Math.max(0, Number(o.totalScu) || 0),
     pickups,
     dropoffs,
+    ...(typeof o.loadNote === 'string' && o.loadNote.trim()
+      ? { loadNote: o.loadNote.trim().slice(0, 80) }
+      : {}),
   }
 }
 
@@ -399,6 +403,7 @@ export type DraftObjective = {
   totalScu: number
   pickups: MissionStop[]
   dropoffs: MissionStop[]
+  loadNote?: string
 }
 
 export function draftObjectiveToMission(o: DraftObjective): MissionObjective {
