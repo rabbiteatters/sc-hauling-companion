@@ -1122,6 +1122,7 @@ function resequenceSuffix(
   load: number,
   capacityScu: number,
   pool: Map<string, number>,
+  options?: { ignoreCapacity?: boolean },
 ): RouteStop[] | null {
   const out: RouteStop[] = []
   let prev = prevLocationId
@@ -1142,7 +1143,7 @@ function resequenceSuffix(
     }
     load += s.cargoDelta
     if (load < -1e-6) return null
-    if (capacityScu > 0 && load > capacityScu + 1e-6) return null
+    if (!options?.ignoreCapacity && capacityScu > 0 && load > capacityScu + 1e-6) return null
     if (s.kind === 'pickup') pool.set(key, (pool.get(key) ?? 0) + scu)
     out.push({ ...s, legDistance: leg, cargoAfter: load })
   }
@@ -1154,8 +1155,9 @@ export function resequenceRouteStops(
   stops: RouteStop[],
   startLocationId: string,
   capacityScu: number,
+  options?: { ignoreCapacity?: boolean },
 ): RouteStop[] | null {
-  return resequenceSuffix(stops, startLocationId, 0, capacityScu, new Map())
+  return resequenceSuffix(stops, startLocationId, 0, capacityScu, new Map(), options)
 }
 
 /** Move one unfinished location visit. Done prefix stops are left unchanged. */

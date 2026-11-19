@@ -146,6 +146,7 @@ function amendObjectivePickup(
   maxUnitScu: number,
   missionTotalFallback: number,
   boxes?: number[],
+  lockedLocationIds?: ReadonlySet<string>,
 ): MissionObjective | null {
   const idx = objective.pickups.findIndex((p) => p.locationId === locationId)
   if (idx < 0) return null
@@ -163,14 +164,22 @@ function amendObjectivePickup(
 
   const objTotal = objective.totalScu > 0 ? objective.totalScu : missionTotalFallback
   const usedThrough = pickups.slice(0, idx + 1).reduce((s, p) => s + p.scu, 0)
-  const laterConfirmedSum = pickups
-    .filter((p, i) => i > idx && p.confirmed)
+  const laterFixedSum = pickups
+    .filter(
+      (p, i) =>
+        i > idx && (p.confirmed || Boolean(lockedLocationIds?.has(p.locationId))),
+    )
     .reduce((s, p) => s + p.scu, 0)
-  const toSpread = Math.max(0, objTotal - usedThrough - laterConfirmedSum)
+  const toSpread = Math.max(0, objTotal - usedThrough - laterFixedSum)
 
   const followingIdx = pickups
     .map((_, i) => i)
-    .filter((i) => i > idx && !pickups[i].confirmed)
+    .filter(
+      (i) =>
+        i > idx &&
+        !pickups[i].confirmed &&
+        !lockedLocationIds?.has(pickups[i].locationId),
+    )
 
   if (followingIdx.length) {
     const amounts = spreadCargo(toSpread, followingIdx.length, maxUnitScu)
@@ -204,6 +213,7 @@ export function amendPickupActual(
   actualScu: number,
   boxes?: number[],
   commodity?: string,
+  lockedLocationIds?: ReadonlySet<string>,
 ): Mission {
   const objectives = legacyMissionToObjectives(mission)
   const wanted = commodity?.trim()
@@ -218,6 +228,7 @@ export function amendPickupActual(
       mission.maxUnitScu,
       mission.totalScu,
       boxes,
+      lockedLocationIds,
     )
     if (!amended) return o
     found = true

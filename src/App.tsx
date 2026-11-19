@@ -69,7 +69,7 @@ import {
   getLocation,
   locationLabel,
 } from './store/catalog'
-import type { HaulType, Mission, OptimizedRoute } from './types'
+import type { HaulType, Mission, OptimizedRoute, RouteStop } from './types'
 import './App.css'
 
 const cached = loadAppCache()
@@ -1170,6 +1170,79 @@ export default function App() {
     setMissionsInitialized(true)
   }
 
+  /** Copy the mission's current pickup and drop amounts onto stops we are keeping. */
+  function syncKeptCargo(stops: RouteStop[], list: Mission[]): RouteStop[] {
+    return stops.map((stop) => {
+      const mission = list.find((m) => m.id === stop.missionId)
+      if (!mission) return stop
+      const wanted = stop.commodity?.trim()
+      const objectives = (mission.objectives ?? []).filter(
+        (o) => !wanted || o.commodity.trim() === wanted,
+      )
+      const places = objectives.flatMap((o) =>
+        stop.kind === 'pickup' ? o.pickups : o.dropoffs,
+      )
+      const match = places.find((place) => place.locationId === stop.locationId)
+      if (!match) return stop
+      const scu = Math.max(0, Math.round(match.scu))
+      const cargoDelta = stop.kind === 'pickup' ? scu : -scu
+      if (cargoDelta === stop.cargoDelta) return stop
+      return { ...stop, cargoDelta }
+    })
+  }
+
+  /**
+   * Keep the run through the current stop and plan only what is still ahead.
+   * Falls back to a full route only when there is nothing in progress to keep.
+   */
+  function replanRestAfterAmend(ready: Mission[]) {
+    if (!startId) return
+    const enabled = ready.filter(isMissionEnabled)
+    const groups = route ? groupRouteByLocation(route.stops) : []
+    if (!route || groups.length === 0) {
+      setRoute(optimizeRoute(enabled, startId, capacityScu))
+      setDoneGroups(new Set())
+      setRouteRearrange(false)
+      setRouteStep(0)
+      return
+    }
+    const safeStep = Math.max(0, Math.min(routeStep, groups.length - 1))
+    const kept = syncKeptCargo(
+      groups.slice(0, safeStep + 1).flatMap((group) => group.actions),
+      ready,
+    )
+    const resequenced = resequenceRouteStops(kept, startId, capacityScu, {
+      ignoreCapacity: true,
+    })
+    const prefix = resequenced ?? kept
+    const fromId = prefix[prefix.length - 1]?.locationId
+    const next = fromId
+      ? optimizeRouteFollowing(enabled, capacityScu, prefix, fromId, {
+          trustCargoAfter: resequenced != null,
+        })
+      : null
+    const stops = next?.stops ?? prefix
+    setRoute(
+      next ?? {
+        ...route,
+        stops: prefix,
+        method: 'following',
+        totalDistance: prefix.reduce((sum, stop) => sum + stop.legDistance, 0),
+        peakLoad: prefix.reduce((peak, stop) => Math.max(peak, stop.cargoAfter), 0),
+      },
+    )
+    const restGroups = groupRouteByLocation(stops)
+    setRouteStep(Math.max(0, Math.min(safeStep, restGroups.length - 1)))
+    setDoneGroups((prev) => {
+      const marks = new Set<number>()
+      for (const index of prev) {
+        if (index <= safeStep) marks.add(index)
+      }
+      return marks
+    })
+    setRouteRearrange(false)
+  }
+
   function amendPickup(
     missionId: string,
     locationId: string,
@@ -1184,21 +1257,29 @@ export default function App() {
       .flatMap((o) => o.pickups)
       .find((p) => p.locationId === locationId)
     const scuChanged = (previousStop?.scu ?? -1) !== Math.max(0, Math.round(actualScu))
+    const groups = route ? groupRouteByLocation(route.stops) : []
+    const safeStep = groups.length
+      ? Math.max(0, Math.min(routeStep, groups.length - 1))
+      : -1
+    const locked = new Set<string>()
+    if (safeStep >= 0) {
+      for (const action of groups
+        .slice(0, safeStep + 1)
+        .flatMap((group) => group.actions)) {
+        if (action.kind !== 'pickup' || action.missionId !== missionId) continue
+        if (action.locationId === locationId) continue
+        if (wanted && action.commodity && action.commodity.trim() !== wanted) continue
+        locked.add(action.locationId)
+      }
+    }
     const next = missions.map((m) =>
       m.id === missionId
-        ? amendPickupActual(m, locationId, actualScu, boxes, commodity)
+        ? amendPickupActual(m, locationId, actualScu, boxes, commodity, locked)
         : m,
     )
     const ready = repairMissionLocations(next)
     setMissions(ready)
-    if (startId && scuChanged) {
-      setRoute(
-        optimizeRoute(ready.filter(isMissionEnabled), startId, capacityScu),
-      )
-      setDoneGroups(new Set())
-      setRouteRearrange(false)
-      setRouteStep(0)
-    }
+    if (startId && scuChanged) replanRestAfterAmend(ready)
   }
 
   function toggleMissionEnabled(id: string) {
