@@ -33,6 +33,28 @@ export function leadingDoneCount(done: ReadonlySet<number>): number {
   return n
 }
 
+/** Missions whose every stop on this route sits in a group marked done. */
+export function completedMissionIds(
+  groups: readonly { actions: readonly { missionId: string }[] }[],
+  done: ReadonlySet<number>,
+): Set<string> {
+  const seen = new Set<string>()
+  const open = new Set<string>()
+  groups.forEach((group, index) => {
+    const finished = done.has(index)
+    for (const action of group.actions) {
+      if (!action.missionId) continue
+      seen.add(action.missionId)
+      if (!finished) open.add(action.missionId)
+    }
+  })
+  const completed = new Set<string>()
+  for (const id of seen) {
+    if (!open.has(id)) completed.add(id)
+  }
+  return completed
+}
+
 /**
  * Stops that Calculate rest keeps: the leading done run, plus any done stop
  * after the current step.

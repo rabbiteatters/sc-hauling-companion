@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { formatAuec, formatDistance, formatHoldCapacity } from '../lib/optimizer'
-import { enrichStopsWithBoxes, followingDoneIndices, groupRouteByLocation, leadingDoneCount } from '../lib/routeGroups'
+import {
+  completedMissionIds,
+  enrichStopsWithBoxes,
+  followingDoneIndices,
+  groupRouteByLocation,
+  leadingDoneCount,
+} from '../lib/routeGroups'
 import {
   allowedCrateSizes,
   countsToBoxes,
@@ -99,6 +105,11 @@ export function RouteSummary({
 
   const doneCount = leadingDoneCount(doneGroups)
   const followingDone = followingDoneIndices(doneGroups, groups.length, safeStep)
+  const finishedMissions = completedMissionIds(groups, doneGroups)
+  const missionTotal = route.selectedMissionIds.length
+  const missionDone = route.selectedMissionIds.filter((id) =>
+    finishedMissions.has(id),
+  ).length
   const canCalculateRest =
     followingDone.length > 0 && followingDone.length < groups.length
 
@@ -282,9 +293,14 @@ export function RouteSummary({
           <span>Trips</span>
           <strong>{route.tripCount}</strong>
         </div>
-        <div>
+        <div
+          className={missionTotal > 0 && missionDone === missionTotal ? 'is-complete' : ''}
+          title={`${missionDone} of ${missionTotal} missions complete`}
+        >
           <span>Missions</span>
-          <strong>{route.selectedMissionIds.length}</strong>
+          <strong>
+            {missionDone}/{missionTotal}
+          </strong>
         </div>
       </div>
 

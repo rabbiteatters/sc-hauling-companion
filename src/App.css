@@ -1175,6 +1175,12 @@ button.chip.on {
   flex-shrink: 0;
 }
 
+.mission-title-row .mission-done-tag {
+  flex-shrink: 0;
+  margin-right: 0;
+  background: rgba(72, 180, 110, 0.14);
+}
+
 .mission-row-compact .mission-name-scroll {
   min-width: 0;
   flex: 1 1 0;
@@ -2529,6 +2535,10 @@ button.danger {
 .route-stats strong {
   font-size: 0.95rem;
   color: var(--fog);
+}
+
+.route-stats .is-complete strong {
+  color: var(--mint);
 }
 
 .stop-list {

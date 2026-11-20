@@ -51,7 +51,7 @@ import {
 } from './lib/objectives'
 import { parseMissionText, readMissionImage } from './lib/ocr'
 import { formatHoldCapacity, moveRouteGroup, optimizeRoute, optimizeRouteFollowing, repairMissionLocations, resequenceRouteStops } from './lib/optimizer'
-import { groupRouteByLocation, leadingDoneCount, followingDoneIndices } from './lib/routeGroups'
+import { completedMissionIds, groupRouteByLocation, leadingDoneCount, followingDoneIndices } from './lib/routeGroups'
 import {
   DEFAULT_MAX_UNIT_SCU,
   amendPickupActual,
@@ -552,6 +552,10 @@ export default function App() {
     () => activeMissions.reduce((s, m) => s + m.totalScu, 0),
     [activeMissions],
   )
+  const finishedMissionIds = useMemo(() => {
+    if (!route) return new Set<string>()
+    return completedMissionIds(groupRouteByLocation(route.stops), doneGroups)
+  }, [route, doneGroups])
 
   useEffect(() => {
     if (missions.length < 2 && missionsRearrangeMode) {
@@ -2226,10 +2230,11 @@ export default function App() {
                 )}
                 {missions.map((m, index) => {
                   const on = isMissionEnabled(m)
+                  const finished = finishedMissionIds.has(m.id)
                   return (
                   <li
                     key={m.id}
-                    className={`mission-row selected mission-row-compact${on ? '' : ' mission-row-off'}`}
+                    className={`mission-row selected mission-row-compact${on ? '' : ' mission-row-off'}${finished ? ' mission-row-done' : ''}`}
                   >
                     <label className="mission-enable" title={on ? 'On for routing' : 'Off for routing'}>
                       <input
@@ -2242,6 +2247,9 @@ export default function App() {
                     <div className="mission-main">
                       <div className="mission-title-row">
                         <span className="mission-code">{m.code}</span>
+                        {finished && (
+                          <span className="tag mission-done-tag">Done</span>
+                        )}
                         <AutoScrollName text={m.name} />
                       </div>
                       <MissionPriorityTags
