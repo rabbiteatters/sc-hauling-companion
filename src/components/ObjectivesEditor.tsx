@@ -3,6 +3,7 @@ import type { CommodityInfo } from '../api/uex'
 import { locationsAllowedForHaul } from '../lib/haulScope'
 import { MAX_HAUL_STOPS, reconcileHaulStops } from '../lib/haulTypes'
 import {
+  applyAutoBalance,
   applyObjectiveTotalDelta,
   changeObjectiveLocationIds,
   createEmptyObjective,
@@ -12,7 +13,7 @@ import {
   objectiveSummaryLine,
   setObjectiveStopScu,
   setObjectiveTotal,
-  spreadObjectiveSide,
+  sideAutoBalance,
   type DraftObjective,
 } from '../lib/objectives'
 import { locationLabel } from '../store/catalog'
@@ -414,11 +415,17 @@ export function ObjectivesEditor({
                         ),
                       )
                     }
-                    onResetFromTotal={() =>
+                    auto={sideAutoBalance(obj, 'pickup')}
+                    onAutoBalance={(on) =>
                       patchAt(
                         index,
-                        spreadObjectiveSide(obj, 'pickup', maxUnitScu),
+                        on
+                          ? applyAutoBalance(obj, 'pickup', maxUnitScu)
+                          : { ...obj, pickupAuto: false },
                       )
+                    }
+                    onResetFromTotal={() =>
+                      patchAt(index, applyAutoBalance(obj, 'pickup', maxUnitScu))
                     }
                   />
 
@@ -474,11 +481,17 @@ export function ObjectivesEditor({
                         ),
                       )
                     }
-                    onResetFromTotal={() =>
+                    auto={sideAutoBalance(obj, 'dropoff')}
+                    onAutoBalance={(on) =>
                       patchAt(
                         index,
-                        spreadObjectiveSide(obj, 'dropoff', maxUnitScu),
+                        on
+                          ? applyAutoBalance(obj, 'dropoff', maxUnitScu)
+                          : { ...obj, dropoffAuto: false },
                       )
+                    }
+                    onResetFromTotal={() =>
+                      patchAt(index, applyAutoBalance(obj, 'dropoff', maxUnitScu))
                     }
                   />
                 </div>
@@ -541,15 +554,19 @@ function StopScuList({
   sideSum,
   totalScu,
   highlighted,
+  auto = false,
+  onAutoBalance,
   onScu,
   onResetFromTotal,
 }: {
   side: 'pickup' | 'dropoff'
-  stops: { locationId: string; scu: number }[]
+  stops: { locationId: string; scu: number; confirmed?: boolean }[]
   mismatch: boolean
   sideSum: number
   totalScu: number
   highlighted?: boolean
+  auto?: boolean
+  onAutoBalance?: (on: boolean) => void
   onScu: (locationId: string, scu: number) => void
   onResetFromTotal: () => void
 }) {
@@ -560,7 +577,22 @@ function StopScuList({
       className={`objective-stop-scu-block${mismatch ? ' is-mismatch' : ''}${highlighted ? ' is-delta-highlight' : ''}`}
     >
       <div className="objective-stop-scu-head">
-        <span>{side === 'pickup' ? 'Pickup loads' : 'Dropoff loads'}</span>
+        <span className="objective-stop-scu-title">
+          <span>{side === 'pickup' ? 'Pickup loads' : 'Dropoff loads'}</span>
+          {stops.length > 1 && onAutoBalance ? (
+            <label
+              className="objective-auto-balance"
+              title="The contract only gives the total SCU. Per-stop loads stay a calculated balance until you enter them."
+            >
+              <input
+                type="checkbox"
+                checked={auto}
+                onChange={(e) => onAutoBalance(e.target.checked)}
+              />
+              <span>Unset · auto balance from total</span>
+            </label>
+          ) : null}
+        </span>
         <div className="objective-stop-scu-sum-row">
           <span
             className={`objective-stop-scu-sum${mismatch ? ' is-mismatch' : ''}${highlighted ? ' is-delta-highlight' : ''}`}
@@ -579,26 +611,35 @@ function StopScuList({
         </div>
       </div>
       <ul className="objective-stop-scu-list" aria-label={`${side} SCU`}>
-        {stops.map((s) => (
-          <li key={s.locationId} className="objective-stop-scu-row">
-            <span
-              className="objective-stop-scu-name"
-              title={locationLabel(s.locationId)}
-            >
-              {locationLabel(s.locationId)}
-            </span>
-            <input
-              type="number"
-              min={0}
-              className={`objective-stop-scu-input${mismatch ? ' input-mismatch' : ''}`}
-              value={s.scu || ''}
-              placeholder="0"
-              aria-label={`SCU at ${locationLabel(s.locationId)}`}
-              onChange={(e) => onScu(s.locationId, Number(e.target.value) || 0)}
-            />
-            <span className="objective-stop-scu-unit">SCU</span>
-          </li>
-        ))}
+        {stops.map((s) => {
+          const estimated = auto && !s.confirmed
+          return (
+            <li key={s.locationId} className="objective-stop-scu-row">
+              <span
+                className="objective-stop-scu-name"
+                title={locationLabel(s.locationId)}
+              >
+                {locationLabel(s.locationId)}
+              </span>
+              <input
+                type="number"
+                min={0}
+                className={`objective-stop-scu-input${mismatch ? ' input-mismatch' : ''}`}
+                value={s.scu || ''}
+                placeholder="0"
+                disabled={estimated}
+                aria-label={`SCU at ${locationLabel(s.locationId)}`}
+                onChange={(e) => onScu(s.locationId, Number(e.target.value) || 0)}
+              />
+              {estimated ? (
+                <span className="balanced-mark" title="Auto-calculated balance">
+                  ?
+                </span>
+              ) : null}
+              <span className="objective-stop-scu-unit">SCU</span>
+            </li>
+          )
+        })}
       </ul>
     </div>
   )

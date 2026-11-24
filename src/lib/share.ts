@@ -18,12 +18,16 @@ export interface ShareSnapshot {
   missions: Mission[]
   route: OptimizedRoute | null
   done: number[]
+  /** Per load/unload marks. Present on live links; older snapshot links omit it. */
+  actions?: string[]
   step: number
 }
 
 export interface RouteSession {
   route: OptimizedRoute | null
   done: number[]
+  /** Per load/unload marks. Absent on sessions saved before this existed. */
+  actions?: string[]
   step: number
 }
 
@@ -37,10 +41,14 @@ export function loadRouteSession(): RouteSession {
     if (!raw) return { route: null, done: [], step: 0 }
     const parsed = JSON.parse(raw) as unknown
     const route = sanitizeRoute(parsed && typeof parsed === 'object' ? (parsed as { route?: unknown }).route : null)
-    const done = sanitizeDone(parsed && typeof parsed === 'object' ? (parsed as { done?: unknown }).done : [])
-    const step = sanitizeStep(parsed && typeof parsed === 'object' ? (parsed as { step?: unknown }).step : 0)
+    const record = parsed && typeof parsed === 'object' ? (parsed as { done?: unknown; step?: unknown; actions?: unknown }) : {}
+    const done = sanitizeDone(record.done)
+    const step = sanitizeStep(record.step)
+    const actions = Object.prototype.hasOwnProperty.call(record, 'actions')
+      ? sanitizeActionMarks(record.actions)
+      : undefined
     if (!route) return { route: null, done: [], step: 0 }
-    return { route, done, step }
+    return { route, done, actions, step }
   } catch {
     return { route: null, done: [], step: 0 }
   }
@@ -58,6 +66,7 @@ export function saveRouteSession(session: RouteSession): void {
         v: 1,
         route: session.route,
         done: session.done,
+        actions: session.actions ?? [],
         step: session.step,
       }),
     )
@@ -649,6 +658,16 @@ function sanitizeDone(raw: unknown): number[] {
   for (const n of raw) {
     if (!Number.isInteger(n) || (n as number) < 0) continue
     seen.add(n as number)
+  }
+  return [...seen]
+}
+
+function sanitizeActionMarks(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    if (typeof item !== 'string' || item.length === 0 || item.length > 400) continue
+    seen.add(item)
   }
   return [...seen]
 }

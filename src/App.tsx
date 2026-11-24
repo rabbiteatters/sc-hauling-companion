@@ -13,6 +13,17 @@ import {
   type OcrBatchItem,
 } from './components/MissionModal'
 import { RouteSummary } from './components/RouteSummary'
+
+function LockIcon() {
+  return (
+    <svg className="lock-icon" viewBox="0 0 24 24" width="12" height="12" aria-hidden>
+      <path
+        fill="currentColor"
+        d="M7 10V7a5 5 0 0 1 10 0v3h1a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h1zm2 0h6V7a3 3 0 0 0-6 0v3z"
+      />
+    </svg>
+  )
+}
 import { FieldClearButton } from './components/FieldClearButton'
 import { ShipPicker } from './components/ShipPicker'
 import { StartLocationPicker } from './components/StartLocationPicker'
@@ -31,7 +42,6 @@ import {
   type CapacityMode,
 } from './lib/appCache'
 import {
-  buildShareUrl,
   hashHasShare,
   loadRouteSession,
   readShareHash,
@@ -39,6 +49,21 @@ import {
   withAutoMissionNames,
   type ShareSnapshot,
 } from './lib/share'
+import {
+  claimLiveRoom,
+  editShareUrl,
+  isLiveOrigin,
+  liveAccessFromHash,
+  liveClientId,
+  liveSnapKey,
+  loadLiveRoom,
+  markLiveOrigin,
+  runShareUrl,
+  startLiveLink,
+  viewShareUrl,
+  type LiveConnection,
+  type LiveRole,
+} from './lib/liveShare'
 import { buildAutoMissionName } from './lib/haulTypes'
 import {
   createEmptyObjective,
@@ -51,7 +76,16 @@ import {
 } from './lib/objectives'
 import { parseMissionText, readMissionImage } from './lib/ocr'
 import { formatHoldCapacity, moveRouteGroup, optimizeRoute, optimizeRouteFollowing, repairMissionLocations, resequenceRouteStops } from './lib/optimizer'
-import { completedMissionIds, groupRouteByLocation, leadingDoneCount, followingDoneIndices } from './lib/routeGroups'
+import {
+  actionKeysForGroups,
+  actionMarkKey,
+  completedMissionIds,
+  fullyDoneGroupIndexes,
+  followingDoneIndices,
+  groupRouteByLocation,
+  leadingDoneCount,
+  remapActionMarks,
+} from './lib/routeGroups'
 import {
   DEFAULT_MAX_UNIT_SCU,
   amendPickupActual,
@@ -75,6 +109,19 @@ import './App.css'
 const cached = loadAppCache()
 const openingShare = hashHasShare()
 const storedRoute = openingShare ? null : loadRouteSession()
+
+function initialDoneActions(): Set<string> {
+  if (!storedRoute?.route) return new Set()
+  const groups = groupRouteByLocation(storedRoute.route.stops)
+  if (storedRoute.actions) {
+    const live = actionKeysForGroups(
+      groups,
+      groups.map((_, index) => index),
+    )
+    return new Set(storedRoute.actions.filter((key) => live.has(key)))
+  }
+  return actionKeysForGroups(groups, storedRoute.done)
+}
 
 function haulTypeLabel(t: HaulType): string {
   return t
@@ -450,16 +497,41 @@ export default function App() {
   const [modalStep, setModalStep] = useState<MissionModalStep | null>(null)
   const [editingMissionId, setEditingMissionId] = useState<string | null>(null)
   const [route, setRoute] = useState<OptimizedRoute | null>(storedRoute?.route ?? null)
-  const [doneGroups, setDoneGroups] = useState<Set<number>>(
-    () => new Set(storedRoute?.done ?? []),
+  const [doneActions, setDoneActions] = useState<Set<string>>(initialDoneActions)
+  const routeGroups = useMemo(
+    () => (route ? groupRouteByLocation(route.stops) : []),
+    [route],
+  )
+  const doneGroups = useMemo(
+    () => fullyDoneGroupIndexes(routeGroups, doneActions),
+    [routeGroups, doneActions],
+  )
+  const finishedMissionIds = useMemo(
+    () => completedMissionIds(routeGroups, doneActions),
+    [routeGroups, doneActions],
   )
   const [routeRearrange, setRouteRearrange] = useState(false)
   const [routeStep, setRouteStep] = useState(storedRoute?.step ?? 0)
   const [shareGate, setShareGate] = useState<'wait' | 'done'>(
     openingShare ? 'wait' : 'done',
   )
-  const [shareNote, setShareNote] = useState('')
-  const [shareLink, setShareLink] = useState<string | null>(null)
+  const [shareLinks, setShareLinks] = useState<{ edit: string; run: string; view: string } | null>(
+    null,
+  )
+  const [copiedLink, setCopiedLink] = useState<'edit' | 'run' | 'view' | ''>('')
+  const [pageHash, setPageHash] = useState(() =>
+    typeof location === 'undefined' ? '' : location.hash,
+  )
+  const [liveConn, setLiveConn] = useState<LiveConnection>('offline')
+  const liveHandle = useRef<{ publish: () => void; close: () => void } | null>(null)
+  const liveStatusRef = useRef<ShareSnapshot | null>(null)
+  const applyLiveRef = useRef<(snap: ShareSnapshot) => void>(() => {})
+  const viewIdRef = useRef<string | null>(null)
+  const runKeyRef = useRef<string | null>(null)
+  const lastRemoteKey = useRef('')
+  const liveSeenRemote = useRef(false)
+  const viewOnlyRef = useRef(false)
+  const lockPlanRef = useRef(false)
   const [configCollapsed, setConfigCollapsed] = useState(false)
   const [missionsCollapsed, setMissionsCollapsed] = useState(false)
   const [missionsRearrangeMode, setMissionsRearrangeMode] = useState(false)
@@ -509,33 +581,62 @@ export default function App() {
 
   function clearPlannedRoute() {
     setRoute(null)
-    setDoneGroups(new Set())
+    setDoneActions(new Set())
     setRouteRearrange(false)
     setRouteStep(0)
     setRestHere(null)
   }
 
-  async function copyShareLink() {
-    const ship = catalog.ships.find((s) => s.id === shipId)
-    const url = await buildShareUrl({
-      capacityMode,
-      shipId,
-      shipName: ship?.name ?? '',
-      customScu,
-      capacityScu,
-      startId,
-      missions,
-      route,
-      done: [...doneGroups],
-      step: routeStep,
+  function openShare() {
+    const access = liveAccessFromHash(location.hash)
+    const stored = access && access.role !== 'view' ? loadLiveRoom() : null
+    const sameRoom = stored && access && access.role !== 'view' && stored.roomId === access.roomId
+    const viewId = sameRoom ? stored.viewId : viewIdRef.current
+    setCopiedLink('')
+    if (access?.role === 'view') {
+      setShareLinks({ edit: '', run: '', view: viewShareUrl(access.viewId) })
+      return
+    }
+    if (access?.role === 'run') {
+      setShareLinks({
+        edit: '',
+        run: runShareUrl(access),
+        view: viewId ? viewShareUrl(viewId) : '',
+      })
+      return
+    }
+    if (access?.role === 'edit') {
+      const runKey = sameRoom ? stored.runKey : runKeyRef.current
+      setShareLinks({
+        edit: editShareUrl(access),
+        run: runKey ? runShareUrl({ roomId: access.roomId, runKey }) : '',
+        view: viewId ? viewShareUrl(viewId) : '',
+      })
+      return
+    }
+    const room = claimLiveRoom()
+    markLiveOrigin(room.roomId)
+    const edit = editShareUrl(room)
+    if (location.hash !== new URL(edit).hash) {
+      history.replaceState(null, '', edit)
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    }
+    setShareLinks({
+      edit,
+      run: runShareUrl(room),
+      view: viewShareUrl(room.viewId),
     })
+    liveHandle.current?.publish()
+  }
+
+  async function copyShareField(kind: 'edit' | 'run' | 'view') {
+    const url = shareLinks?.[kind]
+    if (!url) return
     try {
       await navigator.clipboard.writeText(url)
-      setShareLink(null)
-      setShareNote('copied')
+      setCopiedLink(kind)
     } catch {
-      setShareNote('')
-      setShareLink(url)
+      setCopiedLink('')
     }
   }
 
@@ -552,11 +653,6 @@ export default function App() {
     () => activeMissions.reduce((s, m) => s + m.totalScu, 0),
     [activeMissions],
   )
-  const finishedMissionIds = useMemo(() => {
-    if (!route) return new Set<string>()
-    return completedMissionIds(groupRouteByLocation(route.stops), doneGroups)
-  }, [route, doneGroups])
-
   useEffect(() => {
     if (missions.length < 2 && missionsRearrangeMode) {
       setMissionsRearrangeMode(false)
@@ -662,8 +758,13 @@ export default function App() {
   // Persist all selectable choices, plus the planned route so a shared link
   // still matches after the hash is cleared.
   useEffect(() => {
-    if (shareGate === 'wait') return
-    saveRouteSession({ route, done: [...doneGroups], step: routeStep })
+    if (shareGate === 'wait' || viewOnlyRef.current) return
+    saveRouteSession({
+      route,
+      done: [...doneGroups],
+      actions: [...doneActions],
+      step: routeStep,
+    })
     if (!cacheReady.current) {
       // Skip the first paint so we don't overwrite cache before hydration finishes
       cacheReady.current = true
@@ -690,6 +791,7 @@ export default function App() {
     missionsInitialized,
     route,
     doneGroups,
+    doneActions,
     routeStep,
     shareGate,
   ])
@@ -724,7 +826,18 @@ export default function App() {
     setRedoStack([])
     setRoute(snap.route)
     shareNeedsRoute.current = !snap.route
-    setDoneGroups(new Set(snap.done))
+    const groups = snap.route ? groupRouteByLocation(snap.route.stops) : []
+    const known = actionKeysForGroups(
+      groups,
+      groups.map((_, index) => index),
+    )
+    const sharedMarks =
+      Array.isArray(snap.actions) && snap.route
+        ? new Set(snap.actions.filter((key) => known.has(key)))
+        : snap.route
+          ? actionKeysForGroups(groups, snap.done)
+          : new Set<string>()
+    setDoneActions(sharedMarks)
     setRouteRearrange(false)
     setRouteStep(snap.step)
     setRestHere(null)
@@ -738,7 +851,37 @@ export default function App() {
       missions: snap.missions,
       missionsInitialized: true,
     })
-    saveRouteSession({ route: snap.route, done: snap.done, step: snap.step })
+    saveRouteSession({
+      route: snap.route,
+      done: snap.done,
+      actions: [...sharedMarks],
+      step: snap.step,
+    })
+  }
+
+  applyLiveRef.current = applyShareSnapshot
+  const shipForLive = catalog.ships.find((s) => s.id === shipId)
+  liveStatusRef.current = {
+    capacityMode,
+    shipId,
+    shipName: shipForLive?.name ?? '',
+    customScu,
+    capacityScu,
+    startId,
+    missions,
+    route,
+    done: [...doneGroups],
+    actions: [...doneActions],
+    step: routeStep,
+  }
+  const liveAccess = liveAccessFromHash(pageHash)
+  const liveRole: LiveRole | null = liveAccess?.role ?? null
+  const viewOnly = liveRole === 'view'
+  const lockPlan = liveRole === 'view' || liveRole === 'run'
+  viewOnlyRef.current = viewOnly
+  lockPlanRef.current = lockPlan
+  if (liveAccess?.role === 'edit' && isLiveOrigin(liveAccess.roomId)) {
+    liveSeenRemote.current = true
   }
 
   useEffect(() => {
@@ -746,6 +889,7 @@ export default function App() {
     async function loadShareFromHash() {
       const token = ++generation
       const hash = location.hash
+      setPageHash(hash)
       if (!hashHasShare(hash)) {
         if (token === generation) setShareGate('done')
         return
@@ -790,10 +934,112 @@ export default function App() {
   }, [shareGate, catalog.loadedAt, startId, missions, capacityScu])
 
   useEffect(() => {
-    if (shareNote !== 'copied') return
-    const timer = window.setTimeout(() => setShareNote(''), 2000)
+    const access = liveAccessFromHash(pageHash)
+    if (!access) {
+      liveHandle.current?.close()
+      liveHandle.current = null
+      return
+    }
+    const eager = access.role === 'edit' && isLiveOrigin(access.roomId)
+    if (!eager) {
+      liveSeenRemote.current = false
+      lastRemoteKey.current = ''
+    }
+    const handle = startLiveLink({
+      role: access.role,
+      topicId: access.role === 'view' ? access.viewId : access.roomId,
+      clientId: liveClientId(),
+      eager,
+      getViewId: () => {
+        if (access.role === 'view') return null
+        const stored = loadLiveRoom()
+        if (stored?.roomId === access.roomId) return stored.viewId
+        return viewIdRef.current
+      },
+      getRunKey: () => {
+        if (access.role === 'run') return access.runKey
+        if (access.role !== 'edit') return null
+        const stored = loadLiveRoom()
+        if (stored?.roomId === access.roomId) return stored.runKey
+        return runKeyRef.current
+      },
+      getStatus: () =>
+        liveStatusRef.current ?? {
+          capacityMode,
+          shipId,
+          shipName: '',
+          customScu,
+          capacityScu,
+          startId,
+          missions,
+          route,
+          done: [],
+          actions: [],
+          step: 0,
+        },
+      onStatus: (snap, viewId, runKey) => {
+        if (viewId) {
+          viewIdRef.current = viewId
+          setShareLinks((current) =>
+            current && (current.edit || current.run) && !current.view
+              ? { ...current, view: viewShareUrl(viewId) }
+              : current,
+          )
+        }
+        if (runKey && access.role === 'edit') {
+          runKeyRef.current = runKey
+          setShareLinks((current) =>
+            current && current.edit && !current.run
+              ? { ...current, run: runShareUrl({ roomId: access.roomId, runKey }) }
+              : current,
+          )
+        }
+        lastRemoteKey.current = liveSnapKey(snap)
+        liveSeenRemote.current = true
+        applyLiveRef.current(snap)
+      },
+      onConnection: setLiveConn,
+    })
+    liveHandle.current = handle
+    return () => {
+      handle.close()
+      if (liveHandle.current === handle) liveHandle.current = null
+    }
+    // Restart only when the link in the address bar changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageHash])
+
+  useEffect(() => {
+    if (liveRole !== 'edit' && liveRole !== 'run') return
+    if (!liveSeenRemote.current) return
+    const timer = window.setTimeout(() => {
+      const current = liveStatusRef.current
+      if (!current) return
+      const key = liveSnapKey(current)
+      if (key === lastRemoteKey.current) return
+      lastRemoteKey.current = key
+      liveHandle.current?.publish()
+    }, 400)
     return () => window.clearTimeout(timer)
-  }, [shareNote])
+  }, [
+    liveRole,
+    missions,
+    route,
+    doneActions,
+    doneGroups,
+    routeStep,
+    shipId,
+    startId,
+    capacityMode,
+    customScu,
+    capacityScu,
+  ])
+
+  useEffect(() => {
+    if (!copiedLink) return
+    const timer = window.setTimeout(() => setCopiedLink(''), 2000)
+    return () => window.clearTimeout(timer)
+  }, [copiedLink])
 
   // Fill missing selects once catalog arrives (keep cached values when still valid)
   useEffect(() => {
@@ -900,7 +1146,7 @@ export default function App() {
 
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
-      if (ocrBusyRef.current) return
+      if (lockPlanRef.current || ocrBusyRef.current) return
       const files = [...(e.clipboardData?.items ?? [])]
         .filter((i) => i.type.startsWith('image/'))
         .map((i) => i.getAsFile())
@@ -1205,7 +1451,7 @@ export default function App() {
     const groups = route ? groupRouteByLocation(route.stops) : []
     if (!route || groups.length === 0) {
       setRoute(optimizeRoute(enabled, startId, capacityScu))
-      setDoneGroups(new Set())
+      setDoneActions(new Set())
       setRouteRearrange(false)
       setRouteStep(0)
       return
@@ -1237,13 +1483,9 @@ export default function App() {
     )
     const restGroups = groupRouteByLocation(stops)
     setRouteStep(Math.max(0, Math.min(safeStep, restGroups.length - 1)))
-    setDoneGroups((prev) => {
-      const marks = new Set<number>()
-      for (const index of prev) {
-        if (index <= safeStep) marks.add(index)
-      }
-      return marks
-    })
+    setDoneActions((prev) =>
+      remapActionMarks(prev, (index) => (index <= safeStep ? index : null)),
+    )
     setRouteRearrange(false)
   }
 
@@ -1386,7 +1628,7 @@ export default function App() {
     const ready = repairMissionLocations(missions)
     if (ready !== missions) setMissions(ready)
     setRoute(optimizeRoute(ready.filter(isMissionEnabled), startId, capacityScu))
-    setDoneGroups(new Set())
+    setDoneActions(new Set())
     setRouteRearrange(false)
     setRouteStep(0)
     setConfigCollapsed(true)
@@ -1394,10 +1636,45 @@ export default function App() {
   }
 
   function toggleRouteDone(index: number) {
-    setDoneGroups((prev) => {
+    const group = routeGroups[index]
+    if (!group) return
+    const keys = group.actions.map((_, actionIndex) => actionMarkKey(index, actionIndex))
+    setDoneActions((prev) => {
+      const all = keys.length > 0 && keys.every((key) => prev.has(key))
       const next = new Set(prev)
-      if (next.has(index)) next.delete(index)
-      else next.add(index)
+      for (const key of keys) {
+        if (all) next.delete(key)
+        else next.add(key)
+      }
+      return next
+    })
+  }
+
+  function toggleRouteKind(index: number, kind: 'pickup' | 'dropoff') {
+    const group = routeGroups[index]
+    if (!group) return
+    const keys = group.actions
+      .map((action, actionIndex) => ({ action, actionIndex }))
+      .filter(({ action }) => action.kind === kind)
+      .map(({ actionIndex }) => actionMarkKey(index, actionIndex))
+    setDoneActions((prev) => {
+      const all = keys.length > 0 && keys.every((key) => prev.has(key))
+      const next = new Set(prev)
+      for (const key of keys) {
+        if (all) next.delete(key)
+        else next.add(key)
+      }
+      return next
+    })
+  }
+
+  function toggleRouteAction(groupIndex: number, actionIndex: number) {
+    if (!routeGroups[groupIndex]?.actions[actionIndex]) return
+    const key = actionMarkKey(groupIndex, actionIndex)
+    setDoneActions((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
   }
@@ -1437,7 +1714,7 @@ export default function App() {
     const doneCount = groupRouteByLocation(prefix).length
     const marks = new Set<number>()
     for (let i = 0; i < doneCount; i++) marks.add(i)
-    setDoneGroups(marks)
+    setDoneActions(actionKeysForGroups(groupRouteByLocation(next.stops), marks))
     const restGroups = groupRouteByLocation(next.stops)
     setRouteStep(Math.max(0, Math.min(doneCount - 1, restGroups.length - 1)))
     setRestHere(null)
@@ -1475,18 +1752,14 @@ export default function App() {
     const next = moveRouteGroup(route, startId, doneCount, index, delta)
     if (!next) return
     setRoute(next)
-    setDoneGroups((prev) => {
-      const marks = new Set<number>()
-      const a = index
-      const b = index + delta
-      for (const i of prev) {
-        if (i < doneCount) marks.add(i)
-        else if (i === a) marks.add(b)
-        else if (i === b) marks.add(a)
-        else marks.add(i)
-      }
-      return marks
-    })
+    setDoneActions((prev) =>
+      remapActionMarks(prev, (i) => {
+        if (i < doneCount) return i
+        if (i === index) return index + delta
+        if (i === index + delta) return index
+        return i
+      }),
+    )
   }
 
   function resetOcrFileInput() {
@@ -1585,6 +1858,7 @@ export default function App() {
       replaceCurrent?: boolean
     },
   ) {
+    if (lockPlanRef.current) return
     ocrCancelRef.current = false
     setOcrBusy(true)
     setOcrProgress(0)
@@ -1711,6 +1985,7 @@ export default function App() {
     files: Array<File | Blob>,
     opts?: { applyToMissionId?: string | null },
   ) {
+    if (lockPlanRef.current) return
     const images = files.filter((f) => {
       if (f instanceof File) {
         return f.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name)
@@ -1921,16 +2196,16 @@ export default function App() {
             type="button"
             className="ghost"
             disabled={!missions.length}
-            title="Copy a link to these missions, the ship, and the current route"
-            onClick={() => void copyShareLink()}
+            title="Share an all-edit link, a loads-and-stops link, and a view-only link"
+            onClick={openShare}
           >
-            {shareNote === 'copied' ? 'Link copied' : 'Share'}
+            Share
           </button>
         <button
           type="button"
             className="primary calc-btn"
             onClick={runOptimize}
-            disabled={!activeMissions.length || !startId}
+            disabled={lockPlan || !activeMissions.length || !startId}
         >
             Calculate optimal route
         </button>
@@ -1975,7 +2250,7 @@ export default function App() {
             </div>
 
             {!configCollapsed && (
-              <>
+              <fieldset className={`bare-fieldset${lockPlan ? ' plan-locked' : ''}`} disabled={lockPlan}>
                 <div className="mode-toggle" role="group" aria-label="Capacity source">
                   <button
                     type="button"
@@ -2032,11 +2307,11 @@ export default function App() {
                   <span className="dot" />
                   {getLocation(startId)?.shortName ?? '—'}
                 </div>
-              </>
+              </fieldset>
             )}
           </section>
 
-          <section className={`panel collapsible${missionsCollapsed ? ' collapsed' : ''}`}>
+          <section className={`panel collapsible${missionsCollapsed ? ' collapsed' : ''}${lockPlan ? ' plan-locked' : ''}`}>
             <div
               className="panel-head collapse-bar"
               role="button"
@@ -2062,6 +2337,7 @@ export default function App() {
                 <button
                   type="button"
                   className="primary icon-btn add-btn"
+                  disabled={lockPlan}
                   onClick={() => {
                     setEditingMissionId(null)
                     setDraft((d) => ({ ...d, code: nextMissionCode(missions) }))
@@ -2077,7 +2353,7 @@ export default function App() {
                 <button
                   type="button"
                   className={`ghost icon-btn${missionsRearrangeMode ? ' active' : ''}`}
-                  disabled={missions.length < 2}
+                  disabled={lockPlan || missions.length < 2}
                   onClick={() => setMissionsRearrangeMode((v) => !v)}
                   title={
                     missionsRearrangeMode
@@ -2102,7 +2378,7 @@ export default function App() {
                   <button
                     type="button"
                     className="ghost icon-btn"
-                    disabled={missions.length < 2}
+                    disabled={lockPlan || missions.length < 2}
                     onClick={sortMissionsByCodeAction}
                     title="Sort by code"
                     aria-label="Sort by code"
@@ -2118,7 +2394,7 @@ export default function App() {
                 <button
                   type="button"
                   className="ghost icon-btn"
-                  disabled={!undoStack.length}
+                  disabled={lockPlan || !undoStack.length}
                   onClick={undoMissionChange}
                   title={
                     undoStack.length
@@ -2137,7 +2413,7 @@ export default function App() {
                 <button
                   type="button"
                   className="ghost icon-btn"
-                  disabled={!redoStack.length}
+                  disabled={lockPlan || !redoStack.length}
                   onClick={redoMissionChange}
                   title={
                     redoStack.length
@@ -2157,7 +2433,7 @@ export default function App() {
                   type="button"
                   className="ghost icon-btn danger"
                   onClick={requestPurgeMissions}
-                  disabled={!missions.length}
+                  disabled={lockPlan || !missions.length}
                   title="Purge all missions"
                   aria-label="Purge all missions"
                 >
@@ -2180,6 +2456,7 @@ export default function App() {
               accept="image/*"
               multiple
               hidden
+              disabled={lockPlan}
               onChange={(e) => {
                 const files = [...(e.target.files ?? [])]
                 e.target.value = ''
@@ -2240,6 +2517,7 @@ export default function App() {
                       <input
                         type="checkbox"
                         checked={on}
+                        disabled={lockPlan}
                         onChange={() => toggleMissionEnabled(m.id)}
                         aria-label={`${on ? 'Disable' : 'Enable'} mission ${m.code}`}
                       />
@@ -2248,7 +2526,7 @@ export default function App() {
                       <div className="mission-title-row">
                         <span className="mission-code">{m.code}</span>
                         {finished && (
-                          <span className="tag mission-done-tag">Done</span>
+                          <span className="tag mission-done-tag">Completed</span>
                         )}
                         <AutoScrollName text={m.name} />
                       </div>
@@ -2287,7 +2565,7 @@ export default function App() {
                           <button
                             type="button"
                             className="ghost icon-btn"
-                            disabled={index === 0}
+                            disabled={lockPlan || index === 0}
                             onClick={() => moveMission(m.id, -1)}
                             title="Move up"
                             aria-label={`Move ${m.code} up`}
@@ -2299,7 +2577,7 @@ export default function App() {
                           <button
                             type="button"
                             className="ghost icon-btn"
-                            disabled={index >= missions.length - 1}
+                            disabled={lockPlan || index >= missions.length - 1}
                             onClick={() => moveMission(m.id, 1)}
                             title="Move down"
                             aria-label={`Move ${m.code} down`}
@@ -2313,35 +2591,43 @@ export default function App() {
                         <>
                           <button
                             type="button"
-                            className="ghost mission-action-btn"
+                            className={`ghost mission-action-btn${lockPlan ? ' is-locked' : ''}`}
+                            disabled={lockPlan}
                             onClick={() => {
                               setEditingMissionId(m.id)
                               setModalStep('edit')
                             }}
-                            title="Edit"
-                            aria-label={`Edit ${m.code}`}
+                            title={lockPlan ? 'Locked' : 'Edit'}
+                            aria-label={lockPlan ? `Edit ${m.code} is locked` : `Edit ${m.code}`}
                           >
-                            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
-                              <path
-                                fill="currentColor"
-                                d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z"
-                              />
-                            </svg>
+                            <span className="mission-action-glyph">
+                              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                                <path
+                                  fill="currentColor"
+                                  d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z"
+                                />
+                              </svg>
+                              {lockPlan && <LockIcon />}
+                            </span>
                             <span className="mission-action-label">Edit</span>
                           </button>
                           <button
                             type="button"
-                            className="ghost danger mission-action-btn"
+                            className={`ghost danger mission-action-btn${lockPlan ? ' is-locked' : ''}`}
+                            disabled={lockPlan}
                             onClick={() => removeMission(m.id)}
-                            title="Remove"
-                            aria-label={`Remove ${m.code}`}
+                            title={lockPlan ? 'Locked' : 'Remove'}
+                            aria-label={lockPlan ? `Remove ${m.code} is locked` : `Remove ${m.code}`}
                           >
-                            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
-                              <path
-                                fill="currentColor"
-                                d="M6 7h12v2H6V7zm2 3h2v8H8v-8zm3 0h2v8h-2v-8zm3 0h2v8h-2v-8zM9 4h6l1 1h4v2H4V5h4l1-1z"
-                              />
-                            </svg>
+                            <span className="mission-action-glyph">
+                              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                                <path
+                                  fill="currentColor"
+                                  d="M6 7h12v2H6V7zm2 3h2v8H8v-8zm3 0h2v8h-2v-8zm3 0h2v8h-2v-8zM9 4h6l1 1h4v2H4V5h4l1-1z"
+                                />
+                              </svg>
+                              {lockPlan && <LockIcon />}
+                            </span>
                             <span className="mission-action-label">Remove</span>
                           </button>
                         </>
@@ -2356,13 +2642,41 @@ export default function App() {
           </section>
         </aside>
 
-        <section className="route-panel panel">
+        <section className={`route-panel panel${viewOnly ? ' plan-locked' : ''}`}>
           <div className="panel-head">
             <h2>Route summary</h2>
+            {liveRole && (
+              <span
+                className="method-tag"
+                title={
+                  liveRole === 'edit'
+                    ? 'This page can change the whole shared run'
+                    : liveRole === 'run'
+                      ? 'This page can update loads, unloads, and the remaining stops'
+                      : 'This link follows the route and cannot change it'
+                }
+              >
+                {liveConn !== 'live'
+                  ? 'Connecting'
+                  : liveRole === 'view'
+                    ? 'View only'
+                    : liveRole === 'run'
+                      ? 'Loads & stops'
+                      : 'All edit'}
+              </span>
+            )}
             {route && <span className="method-tag">{route.method}</span>}
           </div>
 
-          {!route && (
+          {!route && liveRole === 'view' && (
+            <p className="hint">
+              {liveConn === 'live'
+                ? 'Waiting for the shared route. It will show up here on its own.'
+                : 'Connecting to the live route…'}
+            </p>
+          )}
+
+          {!route && liveRole !== 'view' && (
             <p className="hint">
               Same locations are grouped. Each pickup lists individual crates. Amend
               actual SCU on site to re-spread remaining cargo across following pickups
@@ -2377,15 +2691,20 @@ export default function App() {
               startId={startId}
               capacityScu={capacityScu}
               doneGroups={doneGroups}
+              doneActions={doneActions}
               rearrange={routeRearrange}
               step={routeStep}
               onStepChange={setRouteStep}
               onToggleDone={toggleRouteDone}
+              onToggleKind={toggleRouteKind}
+              onToggleAction={toggleRouteAction}
               onCalculateRest={calculateRest}
               onToggleRearrange={() => setRouteRearrange((v) => !v)}
               onMoveGroup={moveRemainingGroup}
               onAmendPickup={amendPickup}
               onLoadNote={setCargoLoadNote}
+              readOnly={viewOnly}
+              limited={liveRole === 'run'}
             />
           )}
         </section>
@@ -2400,11 +2719,11 @@ export default function App() {
         titles use in-game haul rank/type patterns. Unofficial community tool.
       </footer>
 
-      {shareLink && (
+      {shareLinks && (
         <div
           className="modal-backdrop"
           role="presentation"
-          onClick={() => setShareLink(null)}
+          onClick={() => setShareLinks(null)}
         >
           <div
             className="modal panel confirm-modal share-modal"
@@ -2414,23 +2733,70 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="panel-head">
-              <h2 id="share-title">Share link</h2>
+              <h2 id="share-title">Share links</h2>
             </div>
             <p id="share-desc" className="hint">
-              This link opens the same missions, ship, start, and route, including
-              stops already marked done.
+              {shareLinks.edit
+                ? 'All edit can change the whole run. Loads and stops can update cargo and the remaining stops, not the missions or ship. View only follows along. They stay current while an edit page is open.'
+                : shareLinks.run
+                  ? 'Loads and stops can update cargo and the remaining stops. View only follows along and cannot change them.'
+                  : 'This link follows the route and cannot change it.'}
             </p>
+            {shareLinks.edit && (
+              <label className="field share-link-field">
+                <span>All edit</span>
+                <div className="share-link-row">
+                  <input
+                    readOnly
+                    value={shareLinks.edit}
+                    autoFocus
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <button type="button" className="ghost" onClick={() => void copyShareField('edit')}>
+                    {copiedLink === 'edit' ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+              </label>
+            )}
+            {shareLinks.run && (
+              <label className="field share-link-field">
+                <span>Loads and stops</span>
+                <div className="share-link-row">
+                  <input
+                    readOnly
+                    value={shareLinks.run}
+                    autoFocus={!shareLinks.edit}
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <button type="button" className="ghost" onClick={() => void copyShareField('run')}>
+                    {copiedLink === 'run' ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+              </label>
+            )}
             <label className="field share-link-field">
-              <span>Link</span>
-              <input
-                readOnly
-                value={shareLink}
-                autoFocus
-                onFocus={(e) => e.currentTarget.select()}
-              />
+              <span className="locked-label">
+                <LockIcon />
+                View only
+              </span>
+              <div className="share-link-row">
+                <input
+                  readOnly
+                  value={shareLinks.view || 'Waiting for the live connection…'}
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!shareLinks.view}
+                  onClick={() => void copyShareField('view')}
+                >
+                  {copiedLink === 'view' ? 'Copied' : 'Copy'}
+                </button>
+              </div>
             </label>
             <div className="modal-actions">
-              <button type="button" className="primary" onClick={() => setShareLink(null)}>
+              <button type="button" className="primary" onClick={() => setShareLinks(null)}>
                 Close
               </button>
             </div>

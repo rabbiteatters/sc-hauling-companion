@@ -15,6 +15,8 @@ export function createEmptyObjective(
     totalScu: Math.max(0, Math.round(partial?.totalScu ?? 0)),
     pickups: partial?.pickups?.map(cloneStop) ?? [],
     dropoffs: partial?.dropoffs?.map(cloneStop) ?? [],
+    ...(typeof partial?.pickupAuto === 'boolean' ? { pickupAuto: partial.pickupAuto } : {}),
+    ...(typeof partial?.dropoffAuto === 'boolean' ? { dropoffAuto: partial.dropoffAuto } : {}),
     ...(partial?.loadNote ? { loadNote: partial.loadNote } : {}),
   }
 }
@@ -61,9 +63,20 @@ export function sanitizeObjective(raw: unknown): MissionObjective | null {
     totalScu: Math.max(0, Number(o.totalScu) || 0),
     pickups,
     dropoffs,
+    ...optionalAuto(o.pickupAuto, o.dropoffAuto),
     ...(typeof o.loadNote === 'string' && o.loadNote.trim()
       ? { loadNote: o.loadNote.trim().slice(0, 80) }
       : {}),
+  }
+}
+
+function optionalAuto(
+  pickupAuto: unknown,
+  dropoffAuto: unknown,
+): { pickupAuto?: boolean; dropoffAuto?: boolean } {
+  return {
+    ...(typeof pickupAuto === 'boolean' ? { pickupAuto } : {}),
+    ...(typeof dropoffAuto === 'boolean' ? { dropoffAuto } : {}),
   }
 }
 
@@ -246,13 +259,80 @@ function syncSingletonStops(
   return { ...obj, totalScu: total, pickups, dropoffs }
 }
 
-/** User changed Total SCU — singleton pickup/dropoff locations follow Total. */
+/**
+ * True when this side's per-stop loads are an unset split of the total.
+ * Older missions with several unconfirmed stops are treated as unset.
+ */
+export function sideAutoBalance(
+  obj: MissionObjective,
+  side: 'pickup' | 'dropoff',
+): boolean {
+  const stops = side === 'pickup' ? obj.pickups : obj.dropoffs
+  if (stops.length < 2) return false
+  const flag = side === 'pickup' ? obj.pickupAuto : obj.dropoffAuto
+  if (flag === true) return true
+  if (flag === false) return false
+  return stops.some((s) => !s.confirmed)
+}
+
+/** This stop's SCU is an unconfirmed auto balance, not an entered amount. */
+export function stopIsAutoBalance(
+  objective: MissionObjective,
+  side: 'pickup' | 'dropoff',
+  locationId: string,
+): boolean {
+  const stops = side === 'pickup' ? objective.pickups : objective.dropoffs
+  const match = stops.find((s) => s.locationId === locationId)
+  if (!match || match.confirmed || stops.length < 2) return false
+  const flag = side === 'pickup' ? objective.pickupAuto : objective.dropoffAuto
+  if (flag === false) return false
+  return true
+}
+
+/**
+ * Split the unknown remainder of Total across unconfirmed stops.
+ * Confirmed on-site amounts stay put.
+ */
+export function applyAutoBalance(
+  obj: MissionObjective,
+  side: 'pickup' | 'dropoff',
+  maxUnitScu: number = DEFAULT_MAX_UNIT_SCU,
+): MissionObjective {
+  const total = Math.max(0, Math.round(obj.totalScu))
+  const stops = (side === 'pickup' ? obj.pickups : obj.dropoffs).map((s) => ({ ...s }))
+  const open = stops.filter((s) => !s.confirmed)
+  const fixedSum = stops.filter((s) => s.confirmed).reduce((sum, s) => sum + s.scu, 0)
+  const spread = open.length
+    ? buildStops(
+        open.map((s) => s.locationId),
+        Math.max(0, total - fixedSum),
+        maxUnitScu,
+      )
+    : []
+  const byId = new Map(spread.map((s) => [s.locationId, s.scu]))
+  const nextStops = stops.map((s) => {
+    if (s.confirmed) return s
+    const { boxes: _boxes, ...kept } = s
+    return { ...kept, scu: byId.get(s.locationId) ?? 0, confirmed: false }
+  })
+  return {
+    ...obj,
+    ...(side === 'pickup'
+      ? { pickups: nextStops, pickupAuto: true }
+      : { dropoffs: nextStops, dropoffAuto: true }),
+  }
+}
+
+/** User changed Total SCU — singleton stops follow Total; unset sides rebalance. */
 export function setObjectiveTotal(
   obj: MissionObjective,
   totalScu: number,
-  _maxUnitScu: number = DEFAULT_MAX_UNIT_SCU,
+  maxUnitScu: number = DEFAULT_MAX_UNIT_SCU,
 ): MissionObjective {
-  return syncSingletonStops(obj, totalScu)
+  let next = syncSingletonStops(obj, totalScu)
+  if (sideAutoBalance(next, 'pickup')) next = applyAutoBalance(next, 'pickup', maxUnitScu)
+  if (sideAutoBalance(next, 'dropoff')) next = applyAutoBalance(next, 'dropoff', maxUnitScu)
+  return next
 }
 
 export type ObjectiveLoadBalance = {
@@ -342,11 +422,13 @@ export function setObjectiveStopScu(
 ): MissionObjective {
   const amount = Math.max(0, Math.round(scu) || 0)
   const stops = (side === 'pickup' ? obj.pickups : obj.dropoffs).map((s) =>
-    s.locationId === locationId ? { ...s, scu: amount } : s,
+    s.locationId === locationId ? { ...s, scu: amount, confirmed: false } : s,
   )
   return {
     ...obj,
-    ...(side === 'pickup' ? { pickups: stops } : { dropoffs: stops }),
+    ...(side === 'pickup'
+      ? { pickups: stops, pickupAuto: false }
+      : { dropoffs: stops, dropoffAuto: false }),
   }
 }
 
@@ -377,6 +459,10 @@ export function changeObjectiveLocationIds(
   }
   if (obj.totalScu > 0 && stops.length === 1) {
     return syncSingletonStops(next, obj.totalScu)
+  }
+  const flag = side === 'pickup' ? obj.pickupAuto : obj.dropoffAuto
+  if (flag !== false && stops.length > 1 && stops.some((s) => !s.confirmed)) {
+    return applyAutoBalance(next, side, _maxUnitScu)
   }
   return next
 }
@@ -411,6 +497,8 @@ export type DraftObjective = {
   totalScu: number
   pickups: MissionStop[]
   dropoffs: MissionStop[]
+  pickupAuto?: boolean
+  dropoffAuto?: boolean
   loadNote?: string
 }
 

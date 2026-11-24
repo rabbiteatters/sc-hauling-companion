@@ -1,3 +1,4 @@
+import { stopIsAutoBalance } from './objectives'
 import type { Mission, MissionObjective, OptimizedRoute, RouteLocationGroup, RouteStop } from '../types'
 import { sanitizeBoxes, scuToBoxes } from './spread'
 
@@ -33,20 +34,72 @@ export function leadingDoneCount(done: ReadonlySet<number>): number {
   return n
 }
 
-/** Missions whose every stop on this route sits in a group marked done. */
+const MARK_SEP = '\u001f'
+
+/** One load or unload inside a location visit. Index-based so labels can change. */
+export function actionMarkKey(groupIndex: number, actionIndex: number): string {
+  return `${groupIndex}${MARK_SEP}${actionIndex}`
+}
+
+export function actionKeysForGroups(
+  groups: readonly { actions: readonly unknown[] }[],
+  indexes: Iterable<number>,
+): Set<string> {
+  const keys = new Set<string>()
+  for (const index of indexes) {
+    const group = groups[index]
+    if (!group) continue
+    group.actions.forEach((_, actionIndex) => keys.add(actionMarkKey(index, actionIndex)))
+  }
+  return keys
+}
+
+/** Visits where every load and unload has been marked. */
+export function fullyDoneGroupIndexes(
+  groups: readonly { actions: readonly unknown[] }[],
+  marks: ReadonlySet<string>,
+): Set<number> {
+  const done = new Set<number>()
+  groups.forEach((group, index) => {
+    if (
+      group.actions.length > 0 &&
+      group.actions.every((_, actionIndex) => marks.has(actionMarkKey(index, actionIndex)))
+    ) {
+      done.add(index)
+    }
+  })
+  return done
+}
+
+export function remapActionMarks(
+  marks: ReadonlySet<string>,
+  mapIndex: (index: number) => number | null,
+): Set<string> {
+  const next = new Set<string>()
+  for (const key of marks) {
+    const sep = key.indexOf(MARK_SEP)
+    const index = Number(key.slice(0, sep))
+    if (!Number.isInteger(index)) continue
+    const mapped = mapIndex(index)
+    if (mapped == null) continue
+    next.add(`${mapped}${key.slice(sep)}`)
+  }
+  return next
+}
+
+/** Missions whose every load and unload on this route is marked. */
 export function completedMissionIds(
   groups: readonly { actions: readonly { missionId: string }[] }[],
-  done: ReadonlySet<number>,
+  marks: ReadonlySet<string>,
 ): Set<string> {
   const seen = new Set<string>()
   const open = new Set<string>()
   groups.forEach((group, index) => {
-    const finished = done.has(index)
-    for (const action of group.actions) {
-      if (!action.missionId) continue
+    group.actions.forEach((action, actionIndex) => {
+      if (!action.missionId) return
       seen.add(action.missionId)
-      if (!finished) open.add(action.missionId)
-    }
+      if (!marks.has(actionMarkKey(index, actionIndex))) open.add(action.missionId)
+    })
   })
   const completed = new Set<string>()
   for (const id of seen) {
@@ -118,6 +171,18 @@ function boxesForStop(mission: Mission | undefined, stop: RouteStop): number[] {
   return scuToBoxes(scu, maxUnit)
 }
 
+/** True when this action's SCU is an unconfirmed split across more than one stop. */
+function balancedAmount(mission: Mission | undefined, stop: RouteStop): boolean {
+  const objectives = objectivesForStop(mission, stop.commodity)
+  const side = stop.kind === 'pickup' ? 'pickup' : 'dropoff'
+  for (const objective of objectives) {
+    const stops = side === 'pickup' ? objective.pickups : objective.dropoffs
+    if (!stops.some((s) => s.locationId === stop.locationId)) continue
+    return stopIsAutoBalance(objective, side, stop.locationId)
+  }
+  return false
+}
+
 /** Attach box breakdowns + clearer mission labels from catalog. */
 export function enrichStopsWithBoxes(
   route: OptimizedRoute,
@@ -143,6 +208,7 @@ export function enrichStopsWithBoxes(
       boxes: boxesForStop(m, s),
       commodity: s.commodity || m?.commodity,
       confirmed: s.kind === 'pickup' ? Boolean(pickup?.confirmed) : undefined,
+      balanced: balancedAmount(m, s),
       ...(loadNote ? { loadNote } : {}),
     }
   })

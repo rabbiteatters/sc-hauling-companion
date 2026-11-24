@@ -117,6 +117,8 @@ function sanitizeDraftObjective(raw: unknown): DraftObjective | null {
     totalScu: Math.max(0, Number(o.totalScu) || 0),
     pickups: sanitizeStops(o.pickups, true),
     dropoffs: sanitizeStops(o.dropoffs, false),
+    ...(typeof o.pickupAuto === 'boolean' ? { pickupAuto: o.pickupAuto } : {}),
+    ...(typeof o.dropoffAuto === 'boolean' ? { dropoffAuto: o.dropoffAuto } : {}),
   }
 }
 

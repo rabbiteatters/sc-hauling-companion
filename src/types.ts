@@ -71,6 +71,13 @@ export interface MissionObjective {
   totalScu: number
   pickups: MissionStop[]
   dropoffs: MissionStop[]
+  /**
+   * Per-stop pickup SCU is unknown. Only the total was given, so the loads
+   * are a calculated balance. False means the amounts were entered.
+   */
+  pickupAuto?: boolean
+  /** Same as pickupAuto, for dropoff loads. */
+  dropoffAuto?: boolean
   /** Where this cargo sits in the hold, so the right stack is unloaded. */
   loadNote?: string
 }
@@ -133,6 +140,8 @@ export interface RouteStop {
   boxes?: number[]
   commodity?: string
   confirmed?: boolean
+  /** SCU was split across stops automatically and has not been confirmed on site. */
+  balanced?: boolean
   /** Copied from the cargo leg for display. */
   loadNote?: string
 }
